@@ -58,8 +58,8 @@ host-specific paths in deployment references; revalidate addresses at use time.
 ## Install
 
 ```bash
-codex plugin marketplace add hheei/codex-mono --ref main
-codex plugin add cloud-service@codex-mono
+codex plugin marketplace add hheei/agents-mono --ref main
+codex plugin add cloud-service@agents-mono
 ```
 
 This plugin replaces the former `singbox` marketplace entry.

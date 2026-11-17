@@ -7,7 +7,7 @@ ASE-based atomistic structure utilities, `vasp-helper` for VASP work, and `ppafm
 After installing `atoms-plugin` from the Codex marketplace, initialize the private `hheei/vasp-source` submodule and refresh the plugin cache with the bundled setup script:
 
 ```bash
-setup_script="$(find "${CODEX_HOME:-$HOME/.codex}/plugins/cache/codex-mono/atoms-plugin" -path '*/scripts/install-vasp-source.sh' -print -quit)"
+setup_script="$(find "${CODEX_HOME:-$HOME/.codex}/plugins/cache/agents-mono/atoms-plugin" -path '*/scripts/install-vasp-source.sh' -print -quit)"
 bash "$setup_script"
 ```
 

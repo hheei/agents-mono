@@ -6,8 +6,8 @@
     "name": "hheei",
     "url": "https://github.com/hheei"
   },
-  "homepage": "https://github.com/hheei/codex-mono",
-  "repository": "https://github.com/hheei/codex-mono",
+  "homepage": "https://github.com/hheei/agents-mono",
+  "repository": "https://github.com/hheei/agents-mono",
   "license": "MIT",
   "keywords": [
     "ssh",
@@ -25,7 +25,7 @@
       "MCP",
       "SSH"
     ],
-    "websiteURL": "https://github.com/hheei/codex-mono",
+    "websiteURL": "https://github.com/hheei/agents-mono",
     "defaultPrompt": "Use host_list to discover configured SSH aliases. For every SSH remote file read, write, edit, search, listing, or inspection request, call host_mount first and then use local file tools under its returned paths. Use host_exec for remote process or service commands; it is non-interactive and does not support sudo or password prompts. Keep grep and find scoped to narrow paths; never recursively scan a mounted root.",
     "brandColor": "#111827",
     "composerIcon": "./assets/icon.svg"

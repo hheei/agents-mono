@@ -83,6 +83,6 @@ Native Windows is unsupported. SSHFS-Win uses drive letters and Windows-specific
 ## Install
 
 ```bash
-codex plugin marketplace add hheei/codex-mono --ref main
-codex plugin add sshfs@codex-mono
+codex plugin marketplace add hheei/agents-mono --ref main
+codex plugin add sshfs@agents-mono
 ```

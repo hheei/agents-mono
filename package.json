@@ -1,17 +1,17 @@
 {
-  "name": "codex-mono",
+  "name": "agents-mono",
   "version": "0.5.0",
   "private": true,
   "description": "Codex plugin monorepo with SSH host tools, shared SSHFS mounts, and local workflow plugins",
   "type": "module",
   "license": "MIT",
-  "homepage": "https://github.com/hheei/codex-mono",
+  "homepage": "https://github.com/hheei/agents-mono",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/hheei/codex-mono.git"
+    "url": "git+https://github.com/hheei/agents-mono.git"
   },
   "bugs": {
-    "url": "https://github.com/hheei/codex-mono/issues"
+    "url": "https://github.com/hheei/agents-mono/issues"
   },
   "author": "hheei",
   "files": [

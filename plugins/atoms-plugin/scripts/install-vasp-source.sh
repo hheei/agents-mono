@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-marketplace="${CODEX_MARKETPLACE:-codex-mono}"
+marketplace="${CODEX_MARKETPLACE:-agents-mono}"
 plugin="atoms-plugin"
 submodule_path="plugins/atoms-plugin/skills/vasp-helper/source"
 codex_home="${CODEX_HOME:-$HOME/.codex}"
