@@ -163,6 +163,7 @@ export function createMcpServer(opts: McpServerOptions = {}) {
 				case "tools/call":
 					return await callTool(id, msg.params, ops);
 				default:
+					if (msg.id === undefined) return undefined;
 					return err(id, -32601, `Method not found: ${msg.method}`);
 			}
 		},
