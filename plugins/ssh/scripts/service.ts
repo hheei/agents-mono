@@ -364,6 +364,10 @@ export class PaneService {
 		const pane = await withStateLock(this.#paths, async () => {
 			const { state } = await this.reconcileAndGc();
 			const found = findPaneOrThrow(state, id);
+			if (isLocalHost(found.host)) {
+				await writeState(this.#paths, state);
+				throw new Error(`download is only supported on remote panes; pane ${id} is local`);
+			}
 			found.usedAt = this.#now();
 			await writeState(this.#paths, state);
 			return { ...found };
@@ -380,6 +384,10 @@ export class PaneService {
 		const pane = await withStateLock(this.#paths, async () => {
 			const { state } = await this.reconcileAndGc();
 			const found = findPaneOrThrow(state, id);
+			if (isLocalHost(found.host)) {
+				await writeState(this.#paths, state);
+				throw new Error(`upload is only supported on remote panes; pane ${id} is local`);
+			}
 			found.usedAt = this.#now();
 			await writeState(this.#paths, state);
 			return { ...found };

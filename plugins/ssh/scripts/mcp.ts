@@ -92,7 +92,7 @@ const TOOLS = [
 	},
 	{
 		name: "download",
-		description: "Download/copy from pane (remote relative to pane cwd; local defaults to ~/Downloads).",
+		description: "SFTP download from a remote pane (remote relative to pane cwd; local defaults to ~/Downloads).",
 		inputSchema: {
 			type: "object",
 			properties: {
@@ -106,7 +106,7 @@ const TOOLS = [
 	},
 	{
 		name: "upload",
-		description: "Upload/copy to pane (remote defaults to pane cwd).",
+		description: "SFTP upload to a remote pane (remote defaults to pane cwd).",
 		inputSchema: {
 			type: "object",
 			properties: {

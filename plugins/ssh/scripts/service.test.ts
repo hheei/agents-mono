@@ -700,4 +700,17 @@ describe("PaneService", () => {
 		const uploaded = await service.upload({ id: p2.id, local: localSrc, remote: "~" });
 		expect(uploaded.remote).toBe("/home/remote/sample.txt");
 	});
+
+	test("rejects download and upload on local panes", async () => {
+		const cache = await tempCache();
+		const harness = createHerdrHarness();
+		const service = new PaneService({
+			runner: harness.runner,
+			env: { AGENTS_SSH_CACHE_DIR: cache },
+		});
+
+		const localPane = await service.spawn();
+		await expect(service.download({ id: localPane.id, remote: "a.txt" })).rejects.toThrow("remote panes");
+		await expect(service.upload({ id: localPane.id, local: "a.txt" })).rejects.toThrow("remote panes");
+	});
 });
