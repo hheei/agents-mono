@@ -22,7 +22,7 @@ interface JsonRpcResponse {
 
 interface McpServerOptions {
 	get?: (input: { id?: string; lines?: number }) => Promise<GetResult>;
-	spawn?: (input: { host: string; cwd?: string; ttl?: number }) => Promise<PaneInfo>;
+	spawn?: (input: { host?: string; cwd?: string; ttl?: number }) => Promise<PaneInfo>;
 	send?: (input: { id: string; input: string; async?: boolean; timeout_ms?: number }) => Promise<PaneResult>;
 	wait?: (input: { id: string; timeout_ms?: number; lines?: number }) => Promise<PaneResult>;
 	download?: (input: { id: string; remote: string; local?: string }) => Promise<TransferResult>;
@@ -49,7 +49,7 @@ const TOOLS = [
 	},
 	{
 		name: "spawn",
-		description: "Open a shell pane on host.",
+		description: "Open a shell pane (host defaults to 'local', or pass an SSH alias).",
 		inputSchema: {
 			type: "object",
 			properties: {
@@ -57,7 +57,7 @@ const TOOLS = [
 				cwd: { type: "string" },
 				ttl: { type: "integer", minimum: 0 },
 			},
-			required: ["host"],
+			required: [],
 			additionalProperties: false,
 		},
 	},
@@ -92,7 +92,7 @@ const TOOLS = [
 	},
 	{
 		name: "download",
-		description: "SFTP download (remote relative to pane cwd; local defaults to ~/Downloads).",
+		description: "Download/copy from pane (remote relative to pane cwd; local defaults to ~/Downloads).",
 		inputSchema: {
 			type: "object",
 			properties: {
@@ -106,7 +106,7 @@ const TOOLS = [
 	},
 	{
 		name: "upload",
-		description: "SFTP upload (remote defaults to pane cwd).",
+		description: "Upload/copy to pane (remote defaults to pane cwd).",
 		inputSchema: {
 			type: "object",
 			properties: {
@@ -196,7 +196,7 @@ async function callTool(
 
 			case "spawn": {
 				assertKnownKeys(a, ["host", "cwd", "ttl"], "spawn");
-				const host = validateHost(reqString(a.host, "spawn.host"));
+				const host = a.host === undefined || a.host === null ? "local" : validateHost(reqString(a.host, "spawn.host"));
 				const cwd = optString(a.cwd, "spawn.cwd");
 				if (cwd) assertNoControlChars(cwd, "spawn.cwd");
 				const ttl = optInt(a.ttl, "spawn.ttl", 0);

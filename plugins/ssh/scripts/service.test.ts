@@ -582,7 +582,7 @@ describe("PaneService", () => {
 			env: { AGENTS_SSH_CACHE_DIR: cache },
 		});
 
-		const spawned = await service.spawn({ host: "local" });
+		const spawned = await service.spawn();
 		harness.setWaitMiss(true);
 		const res = await service.send({ id: spawned.id, input: "echo ok", timeout_ms: 50 });
 		expect(res).toEqual({

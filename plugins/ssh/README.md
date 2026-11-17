@@ -1,11 +1,11 @@
 # SSH Panes Plugin
 
-Stateful remote/local shell panes backed by Herdr + OpenSSH ControlMaster + SFTP.
+Stateful local and remote shell panes backed by Herdr + OpenSSH ControlMaster + SFTP.
 
 ## Tools (`ssh` namespace)
 
 - `get`: List all active panes, or pass `id` to inspect a pane's state, `fg`/`tty`, and recent output without blocking.
-- `spawn`: Open a shell pane on an SSH alias (or `local`), optionally starting in `cwd` (supports `~` / `~/`), and return its 6-char lowercase hex `id`.
+- `spawn`: Open a shell pane (`host` defaults to `local`, or pass an SSH alias), optionally starting in `cwd` (supports `~` / `~/`), and return its 6-char lowercase hex `id`.
 - `send`: Run `input` in an `idle` pane (sync wait or `async: true`), or send interactive text/keys (e.g. `"y\n"`, `"ctrl-c"`) to a `busy` pane.
 - `wait`: Wait for a `busy` pane to become `idle` (reporting `fg`/`tty`/`stalled` on timeout).
 - `download`: SFTP download `remote` (supports `~/` or relative to pane `cwd`) to `local` (defaults to `~/Downloads`).

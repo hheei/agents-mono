@@ -154,8 +154,8 @@ export class PaneService {
 		return { ...settled, host: pane.host };
 	}
 
-	async spawn(input: { host: string; cwd?: string; ttl?: number }): Promise<PaneInfo> {
-		const host = validateHost(reqString(input.host, "host"));
+	async spawn(input: { host?: string; cwd?: string; ttl?: number } = {}): Promise<PaneInfo> {
+		const host = input.host === undefined || input.host === null ? "local" : validateHost(reqString(input.host, "host"));
 		const cwd = optString(input.cwd, "cwd");
 		if (cwd) assertNoControlChars(cwd, "cwd");
 		const ttl = normalizeTtl(input.ttl, this.#defaultTtl);

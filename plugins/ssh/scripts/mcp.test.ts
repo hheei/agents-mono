@@ -206,7 +206,7 @@ describe("ssh MCP server", () => {
 		});
 
 		await server.handle({ jsonrpc: "2.0", id: 20, method: "tools/call", params: { name: "get", arguments: { id: null, lines: null } } });
-		await server.handle({ jsonrpc: "2.0", id: 21, method: "tools/call", params: { name: "spawn", arguments: { host: "mac", cwd: null, ttl: null } } });
+		await server.handle({ jsonrpc: "2.0", id: 21, method: "tools/call", params: { name: "spawn", arguments: { cwd: null, ttl: null } } });
 		const silentSend = await server.handle({
 			jsonrpc: "2.0",
 			id: 22,
@@ -237,7 +237,7 @@ describe("ssh MCP server", () => {
 
 		expect(calls).toEqual([
 			"get:*:-",
-			"spawn:mac:-:-",
+			"spawn:local:-:-",
 			"send:a1b2c3:-:-",
 			"wait:a1b2c3:-:-",
 			"dl:a1b2c3:f.txt:-",
