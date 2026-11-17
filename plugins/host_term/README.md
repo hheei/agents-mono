@@ -1,8 +1,8 @@
-# SSH Panes Plugin
+# Host Term Plugin
 
 Stateful local and remote shell panes backed by Herdr + OpenSSH ControlMaster + SFTP.
 
-## Tools (`ssh` namespace)
+## Tools (`host_term` namespace)
 
 - `get`: List all active panes, or pass `id` to inspect a pane's state, `fg`/`tty`, and recent output without blocking.
 - `spawn`: Open a shell pane (`host` defaults to `local`, or pass an SSH alias), optionally starting in `cwd` (supports `~` / `~/`), and return its 6-char lowercase hex `id`.
@@ -22,5 +22,5 @@ Stateful local and remote shell panes backed by Herdr + OpenSSH ControlMaster + 
 
 ```bash
 codex plugin marketplace add hheei/agents-mono --ref main
-codex plugin add ssh@agents-mono
+codex plugin add host_term@agents-mono
 ```

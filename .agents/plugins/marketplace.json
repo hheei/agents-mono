@@ -17,10 +17,10 @@
       "category": "Productivity"
     },
     {
-      "name": "ssh",
+      "name": "host_term",
       "source": {
         "source": "local",
-        "path": "./plugins/ssh"
+        "path": "./plugins/host_term"
       },
       "policy": {
         "installation": "AVAILABLE",

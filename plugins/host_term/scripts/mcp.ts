@@ -31,7 +31,7 @@ interface McpServerOptions {
 }
 
 const PROTOCOL_VERSION = "2025-06-18";
-const SERVER_INFO = { name: "ssh", version: "0.8.0" };
+const SERVER_INFO = { name: "host_term", version: "0.8.0" };
 
 const TOOLS = [
 	{

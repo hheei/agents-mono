@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { createMcpServer } from "./mcp";
 
-describe("ssh MCP server", () => {
+describe("host_term MCP server", () => {
 	test("exposes concise tools under one namespace", async () => {
 		const server = createMcpServer({
 			get: async () => ({ panes: [] }),
@@ -15,7 +15,7 @@ describe("ssh MCP server", () => {
 		});
 		expect(init?.result).toEqual({
 			protocolVersion: "2025-06-18",
-			serverInfo: { name: "ssh", version: "0.8.0" },
+			serverInfo: { name: "host_term", version: "0.8.0" },
 			capabilities: { tools: {} },
 		});
 
