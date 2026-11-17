@@ -68,10 +68,24 @@ export function validateHexId(raw: string): string {
 }
 
 export function optString(raw: unknown, label: string): string | undefined {
-	if (raw === undefined) return undefined;
+	if (raw === undefined || raw === null) return undefined;
 	if (typeof raw !== "string") throw new Error(`${label} must be a string`);
 	const trimmed = raw.trim();
 	return trimmed === "" ? undefined : trimmed;
+}
+
+export function optInt(raw: unknown, label: string, min: number, max?: number): number | undefined {
+	if (raw === undefined || raw === null) return undefined;
+	if (typeof raw !== "number" || !Number.isInteger(raw) || raw < min || (max !== undefined && raw > max)) {
+		throw new Error(max !== undefined ? `${label} must be an integer between ${min} and ${max}` : `${label} must be an integer >= ${min}`);
+	}
+	return raw;
+}
+
+export function optBool(raw: unknown, label: string): boolean | undefined {
+	if (raw === undefined || raw === null) return undefined;
+	if (typeof raw !== "boolean") throw new Error(`${label} must be a boolean`);
+	return raw;
 }
 
 export function reqString(raw: unknown, label: string): string {
@@ -90,6 +104,15 @@ export function assertNoControlChars(value: string, label: string): string {
 
 export function quoteShell(value: string): string {
 	return `'${value.replaceAll("'", "'\\''")}'`;
+}
+
+export function quoteShellPath(value: string): string {
+	if (value === "~") return '"$HOME"';
+	if (value.startsWith("~/")) {
+		const rest = value.slice(2);
+		return rest ? `"$HOME"/${quoteShell(rest)}` : '"$HOME"';
+	}
+	return quoteShell(value);
 }
 
 export function isLocalHost(host: string): boolean {

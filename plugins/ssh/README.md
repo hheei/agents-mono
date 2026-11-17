@@ -5,11 +5,11 @@ Stateful remote/local shell panes backed by Herdr + OpenSSH ControlMaster + SFTP
 ## Tools (`ssh` namespace)
 
 - `get`: List all active panes, or pass `id` to inspect a pane's state, `fg`/`tty`, and recent output without blocking.
-- `spawn`: Open a tab/pane in the shared `agents-ssh` workspace on an SSH alias (or `local`) and return a 6-char lowercase hex `id`.
+- `spawn`: Open a shell pane on an SSH alias (or `local`), optionally starting in `cwd` (supports `~` / `~/`), and return its 6-char lowercase hex `id`.
 - `send`: Run `input` in an `idle` pane (sync wait or `async: true`), or send interactive text/keys (e.g. `"y\n"`, `"ctrl-c"`) to a `busy` pane.
 - `wait`: Wait for a `busy` pane to become `idle` (reporting `fg`/`tty`/`stalled` on timeout).
-- `download`: SFTP download `remote` (relative to pane `cwd`) to `local` (defaults to `~/Downloads`).
-- `upload`: SFTP upload `local` to `remote` (defaults/resolves to pane `cwd`).
+- `download`: SFTP download `remote` (supports `~/` or relative to pane `cwd`) to `local` (defaults to `~/Downloads`).
+- `upload`: SFTP upload `local` to `remote` (supports `~/` or defaults/resolves to pane `cwd`).
 - `close`: Close pane `id`.
 
 ## Configuration

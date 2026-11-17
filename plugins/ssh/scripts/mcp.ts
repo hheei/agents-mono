@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 
-import { optString, validateHexId, validateHost } from "./process";
+import { assertNoControlChars, optBool, optInt, optString, reqString, validateHexId, validateHost } from "./process";
 import { type CloseResult, type GetResult, type PaneInfo, type PaneResult, PaneService } from "./service";
 import type { TransferResult } from "./ssh";
 
@@ -49,7 +49,7 @@ const TOOLS = [
 	},
 	{
 		name: "spawn",
-		description: "Open a shell pane and return its 6-char lowercase hex id.",
+		description: "Open a shell pane on host.",
 		inputSchema: {
 			type: "object",
 			properties: {
@@ -63,7 +63,7 @@ const TOOLS = [
 	},
 	{
 		name: "send",
-		description: "Run cmd in idle pane (sync wait or async), or send interactive text/keys (e.g. 'y\\n', 'ctrl-c') when busy.",
+		description: "Run command when idle, or send input/keys (e.g. 'y\\n', 'ctrl-c') when busy.",
 		inputSchema: {
 			type: "object",
 			properties: {
@@ -92,7 +92,7 @@ const TOOLS = [
 	},
 	{
 		name: "download",
-		description: "SFTP download from pane (remote relative to pane cwd; local defaults to ~/Downloads).",
+		description: "SFTP download (remote relative to pane cwd; local defaults to ~/Downloads).",
 		inputSchema: {
 			type: "object",
 			properties: {
@@ -106,7 +106,7 @@ const TOOLS = [
 	},
 	{
 		name: "upload",
-		description: "SFTP upload to pane (remote defaults/resolves to pane cwd).",
+		description: "SFTP upload (remote defaults to pane cwd).",
 		inputSchema: {
 			type: "object",
 			properties: {
@@ -184,167 +184,83 @@ async function callTool(
 	}
 	const a = args as Record<string, unknown>;
 
-	switch (name) {
-		case "get": {
-			let paneId: string | undefined;
-			try {
-				paneId = optString(a.id, "get.id");
-			} catch (e) {
-				return err(id, -32602, e instanceof Error ? e.message : String(e));
+	try {
+		switch (name) {
+			case "get": {
+				assertKnownKeys(a, ["id", "lines"], "get");
+				const rawId = optString(a.id, "get.id");
+				const paneId = rawId ? validateHexId(rawId) : undefined;
+				const lines = optInt(a.lines, "get.lines", 1, 10000);
+				return await runOp(id, () => ops.get({ id: paneId, lines }), formatGet);
 			}
-			if (paneId) {
-				const idErr = checkPaneId(paneId, "get.id");
-				if (idErr) return err(id, -32602, idErr);
-			}
-			if (a.lines !== undefined && (!Number.isInteger(a.lines) || (a.lines as number) < 1 || (a.lines as number) > 10000)) {
-				return err(id, -32602, "get.lines must be between 1 and 10000");
-			}
-			if (Object.keys(a).some((k) => !["id", "lines"].includes(k))) {
-				return err(id, -32602, "get received an unknown argument");
-			}
-			return await runOp(
-				id,
-				() => ops.get({ id: paneId, lines: a.lines as number | undefined }),
-				formatGet,
-			);
-		}
 
-		case "spawn": {
-			if (typeof a.host !== "string") return err(id, -32602, "spawn.host must be a string");
-			try {
-				validateHost(a.host);
-			} catch (e) {
-				return err(id, -32602, e instanceof Error ? e.message : String(e));
+			case "spawn": {
+				assertKnownKeys(a, ["host", "cwd", "ttl"], "spawn");
+				const host = validateHost(reqString(a.host, "spawn.host"));
+				const cwd = optString(a.cwd, "spawn.cwd");
+				if (cwd) assertNoControlChars(cwd, "spawn.cwd");
+				const ttl = optInt(a.ttl, "spawn.ttl", 0);
+				return await runOp(id, () => ops.spawn({ host, cwd, ttl }), formatSpawn);
 			}
-			let cwd: string | undefined;
-			try {
-				cwd = optString(a.cwd, "spawn.cwd");
-			} catch (e) {
-				return err(id, -32602, e instanceof Error ? e.message : String(e));
-			}
-			if (a.ttl !== undefined && (!Number.isInteger(a.ttl) || (a.ttl as number) < 0)) {
-				return err(id, -32602, "spawn.ttl must be a non-negative integer");
-			}
-			if (Object.keys(a).some((k) => !["host", "cwd", "ttl"].includes(k))) {
-				return err(id, -32602, "spawn received an unknown argument");
-			}
-			return await runOp(
-				id,
-				() => ops.spawn({ host: a.host as string, cwd, ttl: a.ttl as number | undefined }),
-				formatSpawn,
-			);
-		}
 
-		case "send": {
-			const idErr = checkPaneId(a.id, "send.id");
-			if (idErr) return err(id, -32602, idErr);
-			if (typeof a.input !== "string" || a.input.length === 0 || a.input.includes("\0")) {
-				return err(id, -32602, "send.input must be a non-empty string");
+			case "send": {
+				assertKnownKeys(a, ["id", "input", "async", "timeout_ms"], "send");
+				const paneId = validateHexId(reqString(a.id, "send.id"));
+				if (typeof a.input !== "string" || a.input.length === 0 || a.input.includes("\0")) {
+					return err(id, -32602, "send.input must be a non-empty string");
+				}
+				const runAsync = optBool(a.async, "send.async");
+				const timeoutMs = optInt(a.timeout_ms, "send.timeout_ms", 1, 300000);
+				return await runOp(
+					id,
+					() => ops.send({ id: paneId, input: a.input as string, async: runAsync, timeout_ms: timeoutMs }),
+					formatPaneResult,
+				);
 			}
-			if (a.async !== undefined && typeof a.async !== "boolean") {
-				return err(id, -32602, "send.async must be a boolean");
-			}
-			if (a.timeout_ms !== undefined && (!Number.isInteger(a.timeout_ms) || (a.timeout_ms as number) < 1 || (a.timeout_ms as number) > 300000)) {
-				return err(id, -32602, "send.timeout_ms must be between 1 and 300000");
-			}
-			if (Object.keys(a).some((k) => !["id", "input", "async", "timeout_ms"].includes(k))) {
-				return err(id, -32602, "send received an unknown argument");
-			}
-			return await runOp(
-				id,
-				() => ops.send(a as { id: string; input: string; async?: boolean; timeout_ms?: number }),
-				formatPaneResult,
-			);
-		}
 
-		case "wait": {
-			const idErr = checkPaneId(a.id, "wait.id");
-			if (idErr) return err(id, -32602, idErr);
-			if (a.timeout_ms !== undefined && (!Number.isInteger(a.timeout_ms) || (a.timeout_ms as number) < 1 || (a.timeout_ms as number) > 300000)) {
-				return err(id, -32602, "wait.timeout_ms must be between 1 and 300000");
+			case "wait": {
+				assertKnownKeys(a, ["id", "timeout_ms", "lines"], "wait");
+				const paneId = validateHexId(reqString(a.id, "wait.id"));
+				const timeoutMs = optInt(a.timeout_ms, "wait.timeout_ms", 1, 300000);
+				const lines = optInt(a.lines, "wait.lines", 1, 10000);
+				return await runOp(id, () => ops.wait({ id: paneId, timeout_ms: timeoutMs, lines }), formatPaneResult);
 			}
-			if (a.lines !== undefined && (!Number.isInteger(a.lines) || (a.lines as number) < 1 || (a.lines as number) > 10000)) {
-				return err(id, -32602, "wait.lines must be between 1 and 10000");
-			}
-			if (Object.keys(a).some((k) => !["id", "timeout_ms", "lines"].includes(k))) {
-				return err(id, -32602, "wait received an unknown argument");
-			}
-			return await runOp(
-				id,
-				() => ops.wait(a as { id: string; timeout_ms?: number; lines?: number }),
-				formatPaneResult,
-			);
-		}
 
-		case "download": {
-			const idErr = checkPaneId(a.id, "download.id");
-			if (idErr) return err(id, -32602, idErr);
-			if (typeof a.remote !== "string" || !a.remote.trim()) {
-				return err(id, -32602, "download.remote must be a non-empty string");
+			case "download": {
+				assertKnownKeys(a, ["id", "remote", "local"], "download");
+				const paneId = validateHexId(reqString(a.id, "download.id"));
+				const remote = assertNoControlChars(reqString(a.remote, "download.remote"), "download.remote");
+				const local = optString(a.local, "download.local");
+				if (local) assertNoControlChars(local, "download.local");
+				return await runOp(id, () => ops.download({ id: paneId, remote, local }), (v) => v.local);
 			}
-			let local: string | undefined;
-			try {
-				local = optString(a.local, "download.local");
-			} catch (e) {
-				return err(id, -32602, e instanceof Error ? e.message : String(e));
-			}
-			if (Object.keys(a).some((k) => !["id", "remote", "local"].includes(k))) {
-				return err(id, -32602, "download received an unknown argument");
-			}
-			return await runOp(
-				id,
-				() => ops.download({ id: a.id as string, remote: a.remote as string, local }),
-				(v) => v.local,
-			);
-		}
 
-		case "upload": {
-			const idErr = checkPaneId(a.id, "upload.id");
-			if (idErr) return err(id, -32602, idErr);
-			if (typeof a.local !== "string" || !a.local.trim()) {
-				return err(id, -32602, "upload.local must be a non-empty string");
+			case "upload": {
+				assertKnownKeys(a, ["id", "local", "remote"], "upload");
+				const paneId = validateHexId(reqString(a.id, "upload.id"));
+				const local = assertNoControlChars(reqString(a.local, "upload.local"), "upload.local");
+				const remote = optString(a.remote, "upload.remote");
+				if (remote) assertNoControlChars(remote, "upload.remote");
+				return await runOp(id, () => ops.upload({ id: paneId, local, remote }), (v) => v.remote);
 			}
-			let remote: string | undefined;
-			try {
-				remote = optString(a.remote, "upload.remote");
-			} catch (e) {
-				return err(id, -32602, e instanceof Error ? e.message : String(e));
-			}
-			if (Object.keys(a).some((k) => !["id", "local", "remote"].includes(k))) {
-				return err(id, -32602, "upload received an unknown argument");
-			}
-			return await runOp(
-				id,
-				() => ops.upload({ id: a.id as string, local: a.local as string, remote }),
-				(v) => v.remote,
-			);
-		}
 
-		case "close": {
-			const idErr = checkPaneId(a.id, "close.id");
-			if (idErr) return err(id, -32602, idErr);
-			if (Object.keys(a).some((k) => k !== "id")) {
-				return err(id, -32602, "close received an unknown argument");
+			case "close": {
+				assertKnownKeys(a, ["id"], "close");
+				const paneId = validateHexId(reqString(a.id, "close.id"));
+				return await runOp(id, () => ops.close({ id: paneId }), (v) => `${v.id} ${v.closed ? "closed" : "not_found"}`);
 			}
-			return await runOp(
-				id,
-				() => ops.close(a as { id: string }),
-				(v) => `${v.id} ${v.closed ? "closed" : "not_found"}`,
-			);
-		}
 
-		default:
-			return err(id, -32602, "Unknown tool");
+			default:
+				return err(id, -32602, "Unknown tool");
+		}
+	} catch (e) {
+		return err(id, -32602, e instanceof Error ? e.message : String(e));
 	}
 }
 
-function checkPaneId(value: unknown, label: string): string | undefined {
-	if (typeof value !== "string") return `${label} must be a 6-character lowercase hex string`;
-	try {
-		validateHexId(value);
-		return undefined;
-	} catch (e) {
-		return e instanceof Error ? e.message : String(e);
+function assertKnownKeys(args: Record<string, unknown>, allowed: string[], tool: string): void {
+	if (Object.keys(args).some((k) => !allowed.includes(k))) {
+		throw new Error(`${tool} received an unknown argument`);
 	}
 }
 

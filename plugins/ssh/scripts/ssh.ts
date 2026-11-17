@@ -86,6 +86,7 @@ export class SshTransport {
 	readonly #cfg: SshCfg;
 	readonly #runner: ProcessRunner;
 	readonly #downloadsDir: string;
+	readonly #remoteHomes = new Map<string, string>();
 
 	constructor(paths: CachePaths, cfg: SshCfg, runner: ProcessRunner, downloadsDir?: string) {
 		this.#paths = paths;
@@ -201,7 +202,7 @@ export class SshTransport {
 	async download(host: string, cwd: string, remoteRaw: string, localRaw?: string): Promise<TransferResult> {
 		const remoteClean = assertNoControlChars(remoteRaw.trim(), "remote");
 		const localClean = localRaw ? assertNoControlChars(localRaw.trim(), "local") : undefined;
-		const remoteAbs = posix.resolve(cwd, remoteClean);
+		const remoteAbs = await this.resolveRemotePath(host, cwd, remoteClean);
 		const base = posix.basename(remoteAbs) || "download";
 		let localAbs = resolveLocalPath(localClean, this.#downloadsDir, base);
 		const wantDir = !!localClean && /[\\/]$/.test(localClean);
@@ -254,8 +255,10 @@ export class SshTransport {
 
 		const kind: "file" | "directory" = info.isDirectory() ? "directory" : "file";
 		const base = basename(localAbs);
-		const wantDir = !!remoteClean && remoteClean.endsWith("/");
-		let remoteAbs = remoteClean ? posix.resolve(cwd, remoteClean) : posix.join(cwd, base);
+		const wantDir = !!remoteClean && (remoteClean.endsWith("/") || remoteClean === "~");
+		let remoteAbs = remoteClean
+			? await this.resolveRemotePath(host, cwd, remoteClean)
+			: posix.join(cwd, base);
 		if (wantDir && posix.basename(remoteAbs) !== base) {
 			remoteAbs = posix.join(remoteAbs, base);
 		}
@@ -300,6 +303,29 @@ export class SshTransport {
 		const target = remoteKind === "directory" ? posix.dirname(remoteAbs) : remoteAbs;
 		await this.runSftpBatch(host, `put -R -- ${quoteSftp(localAbs)} ${quoteSftp(target)}\n`);
 		return { local: localAbs, remote: remoteAbs, kind };
+	}
+
+	private async resolveRemotePath(host: string, cwd: string, raw: string): Promise<string> {
+		if (raw === "~" || raw.startsWith("~/")) {
+			const home = await this.remoteHome(host);
+			if (raw === "~") return home;
+			const rest = raw.slice(2);
+			return rest ? posix.resolve(home, rest) : home;
+		}
+		return posix.resolve(cwd, raw);
+	}
+
+	private async remoteHome(host: string): Promise<string> {
+		if (isLocalHost(host)) return homedir();
+		const cached = this.#remoteHomes.get(host);
+		if (cached) return cached;
+		const res = await this.exec(host, 'printf %s "$HOME"', 10_000);
+		const home = res.stdout.trim();
+		if (res.timedOut || res.exitCode !== 0 || !home.startsWith("/")) {
+			throw new Error(`Failed to resolve HOME on ${host}: ${res.stderr.trim() || `exit ${res.exitCode}`}`);
+		}
+		this.#remoteHomes.set(host, home);
+		return home;
 	}
 
 	private async probeRemoteKind(host: string, remoteAbs: string): Promise<"file" | "directory" | "missing"> {

@@ -49,6 +49,7 @@ function createHerdrHarness(options: { remoteHerdrHosts?: string[] } = {}) {
 	let remotePwd = "/home/user";
 	let nextExitCode = 0;
 	let waitMiss = false;
+	let nextSilent = false;
 	let onWaitAppend: string | undefined;
 
 	const runner: ProcessRunner = async (command, args, _timeoutMs, stdin) => {
@@ -80,6 +81,9 @@ function createHerdrHarness(options: { remoteHerdrHosts?: string[] } = {}) {
 			}
 			if (remoteCmd.startsWith("cat > /tmp/apane_") || remoteCmd.startsWith("mkdir -p --")) {
 				return { exitCode: 0, stdout: "", stderr: "" };
+			}
+			if (remoteCmd === 'printf %s "$HOME"') {
+				return { exitCode: 0, stdout: "/home/remote", stderr: "" };
 			}
 			if (remoteCmd.startsWith("if [ -d ")) {
 				return { exitCode: 0, stdout: "file", stderr: "" };
@@ -233,8 +237,10 @@ function createHerdrHarness(options: { remoteHerdrHosts?: string[] } = {}) {
 			const readyMatch = cmd.match(/READY_%s:(?:%d|0):%s:%s:%s[^']*' '([0-9a-f]{6})'/);
 			if (readyMatch) {
 				const hexId = readyMatch[1];
-				const cdMatch = cmd.match(/cd -- '([^']+)'/);
-				const cwd = cdMatch ? cdMatch[1] : remotePwd;
+				const cdMatch = cmd.match(/cd -- (?:"\$HOME"(?:\/'([^']+)')?|'([^']+)')/);
+				const cwd = cdMatch
+					? cdMatch[2] ?? (cdMatch[1] ? `/home/remote/${cdMatch[1]}` : "/home/remote")
+					: remotePwd;
 				if (cwd === "/missing") {
 					pane.output += `\n__APANE_READY_${hexId}:1:${pane.shellPid}:/dev/pts/9:/tmp__\n`;
 				} else {
@@ -248,7 +254,7 @@ function createHerdrHarness(options: { remoteHerdrHosts?: string[] } = {}) {
 			const startMatch = cmd.match(/START_%s[^']*' '([0-9a-f]{6})'/);
 			if (startMatch) {
 				const tok = startMatch[1];
-				pane.output += `\n__APANE_START_${tok}__\nhello world\n`;
+				pane.output += nextSilent ? `\n__APANE_START_${tok}__\n` : `\n__APANE_START_${tok}__\nhello world\n`;
 				pane.revision += 1;
 				if (nextExecDelay) {
 					pane.fg = { name: "sudo", pid: 999 };
@@ -333,6 +339,9 @@ function createHerdrHarness(options: { remoteHerdrHosts?: string[] } = {}) {
 		},
 		setOnWaitAppend(text: string | undefined) {
 			onWaitAppend = text;
+		},
+		setNextSilent(silent: boolean) {
+			nextSilent = silent;
 		},
 	};
 }
@@ -643,5 +652,52 @@ describe("PaneService", () => {
 
 		await expect(service.spawn({ host: "mac", cwd: "/missing" })).rejects.toThrow("Failed to enter directory");
 		expect(harness.panes.size).toBe(0);
+	});
+
+	test("rejects non-control keys like enter on idle pane and omits empty output", async () => {
+		const cache = await tempCache();
+		const harness = createHerdrHarness();
+		const service = new PaneService({
+			runner: harness.runner,
+			env: { AGENTS_SSH_CACHE_DIR: cache },
+		});
+
+		const spawned = await service.spawn({ host: "mac" });
+		await expect(service.send({ id: spawned.id, input: "enter" })).rejects.toThrow("cannot send key enter to idle pane");
+
+		harness.setNextSilent(true);
+		const silent = await service.send({ id: spawned.id, input: "true" });
+		expect(silent).toEqual({
+			id: spawned.id,
+			status: "idle",
+			cwd: "/home/user",
+			exit_code: 0,
+		});
+		expect("output" in silent).toBe(false);
+	});
+
+	test("expands ~ and ~/ in spawn.cwd and remote download/upload paths", async () => {
+		const cache = await tempCache();
+		const dl = await tempCache();
+		const localSrc = `${dl}/sample.txt`;
+		await Bun.write(localSrc, "hi");
+		const harness = createHerdrHarness();
+		const service = new PaneService({
+			runner: harness.runner,
+			env: { AGENTS_SSH_CACHE_DIR: cache },
+			downloadsDir: dl,
+		});
+
+		const p1 = await service.spawn({ host: "mac", cwd: "~" });
+		expect(p1.cwd).toBe("/home/remote");
+		const p2 = await service.spawn({ host: "mac", cwd: "~/work/proj" });
+		expect(p2.cwd).toBe("/home/remote/work/proj");
+
+		const downloaded = await service.download({ id: p2.id, remote: "~/logs/run.log" });
+		expect(downloaded.remote).toBe("/home/remote/logs/run.log");
+		expect(harness.sftpCalls.at(-1)?.stdin).toContain('"/home/remote/logs/run.log"');
+
+		const uploaded = await service.upload({ id: p2.id, local: localSrc, remote: "~" });
+		expect(uploaded.remote).toBe("/home/remote/sample.txt");
 	});
 });

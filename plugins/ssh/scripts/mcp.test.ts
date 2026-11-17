@@ -175,4 +175,73 @@ describe("ssh MCP server", () => {
 			"close:a1b2c3",
 		]);
 	});
+
+	test("accepts null optional params, rejects control chars, trims ids, and omits empty output text", async () => {
+		const calls: string[] = [];
+		const server = createMcpServer({
+			get: async (input) => {
+				calls.push(`get:${input.id ?? "*"}:${input.lines ?? "-"}`);
+				return { panes: [] };
+			},
+			spawn: async (input) => {
+				calls.push(`spawn:${input.host}:${input.cwd ?? "-"}:${input.ttl ?? "-"}`);
+				return { id: "a1b2c3", host: input.host, status: "idle", cwd: input.cwd ?? "/home/user" };
+			},
+			send: async (input) => {
+				calls.push(`send:${input.id}:${input.async ?? "-"}:${input.timeout_ms ?? "-"}`);
+				return { id: input.id, status: "idle", cwd: "/tmp", exit_code: 0 };
+			},
+			wait: async (input) => {
+				calls.push(`wait:${input.id}:${input.timeout_ms ?? "-"}:${input.lines ?? "-"}`);
+				return { id: input.id, status: "idle", cwd: "/tmp", exit_code: 0 };
+			},
+			download: async (input) => {
+				calls.push(`dl:${input.id}:${input.remote}:${input.local ?? "-"}`);
+				return { local: "/tmp/Downloads/f.txt", remote: "/tmp/f.txt", kind: "file" };
+			},
+			upload: async (input) => {
+				calls.push(`ul:${input.id}:${input.local}:${input.remote ?? "-"}`);
+				return { local: input.local, remote: "/tmp/f.txt", kind: "file" };
+			},
+		});
+
+		await server.handle({ jsonrpc: "2.0", id: 20, method: "tools/call", params: { name: "get", arguments: { id: null, lines: null } } });
+		await server.handle({ jsonrpc: "2.0", id: 21, method: "tools/call", params: { name: "spawn", arguments: { host: "mac", cwd: null, ttl: null } } });
+		const silentSend = await server.handle({
+			jsonrpc: "2.0",
+			id: 22,
+			method: "tools/call",
+			params: { name: "send", arguments: { id: " a1b2c3 ", input: "true", async: null, timeout_ms: null } },
+		});
+		expect((silentSend?.result as { content: Array<{ text: string }> }).content[0].text).toBe("exit=0 cwd=/tmp");
+
+		await server.handle({ jsonrpc: "2.0", id: 23, method: "tools/call", params: { name: "wait", arguments: { id: "a1b2c3", timeout_ms: null, lines: null } } });
+		await server.handle({ jsonrpc: "2.0", id: 24, method: "tools/call", params: { name: "download", arguments: { id: "a1b2c3", remote: "f.txt", local: null } } });
+		await server.handle({ jsonrpc: "2.0", id: 25, method: "tools/call", params: { name: "upload", arguments: { id: "a1b2c3", local: "/tmp/f.txt", remote: null } } });
+
+		const badCwd = await server.handle({
+			jsonrpc: "2.0",
+			id: 26,
+			method: "tools/call",
+			params: { name: "spawn", arguments: { host: "mac", cwd: "/tmp\nbad" } },
+		});
+		expect(badCwd?.error?.code).toBe(-32602);
+
+		const badRemote = await server.handle({
+			jsonrpc: "2.0",
+			id: 27,
+			method: "tools/call",
+			params: { name: "download", arguments: { id: "a1b2c3", remote: "a\nb" } },
+		});
+		expect(badRemote?.error?.code).toBe(-32602);
+
+		expect(calls).toEqual([
+			"get:*:-",
+			"spawn:mac:-:-",
+			"send:a1b2c3:-:-",
+			"wait:a1b2c3:-:-",
+			"dl:a1b2c3:f.txt:-",
+			"ul:a1b2c3:/tmp/f.txt:-",
+		]);
+	});
 });

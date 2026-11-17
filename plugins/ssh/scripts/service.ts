@@ -10,6 +10,7 @@ import {
 	parseKeyToken,
 	type ProcessRunner,
 	quoteShell,
+	quoteShellPath,
 	reqString,
 	runProcess,
 	truncateOutput,
@@ -137,6 +138,7 @@ export class PaneService {
 				return { ...interrupted, host: pane.host };
 			}
 			const fg = probe?.fg ?? snap.fg;
+			const output = truncateOutput(input.lines == null ? tailLines(parsed.output, 80) : parsed.output);
 			return {
 				id,
 				host: pane.host,
@@ -144,7 +146,7 @@ export class PaneService {
 				cwd: probe?.cwd ?? pane.cwd,
 				...(fg ? { fg } : {}),
 				...(probe?.tty ? { tty: probe.tty } : {}),
-				output: truncateOutput(input.lines === undefined ? tailLines(parsed.output, 80) : parsed.output),
+				...(output ? { output } : {}),
 			};
 		}
 
@@ -184,10 +186,11 @@ export class PaneService {
 		});
 
 		const label = `${id} ${host}`;
+		const herdrCwd = mode === "ssh" || cwd === "~" || cwd?.startsWith("~/") ? undefined : cwd;
 		const { wsId, tabId, paneId } = await this.#herdr.allocatePane(
 			target,
 			label,
-			mode === "ssh" ? undefined : cwd,
+			herdrCwd,
 		);
 
 		try {
@@ -197,13 +200,13 @@ export class PaneService {
 			const ttySnip = `__apane_t=$(tty 2>/dev/null || true); case "$__apane_t" in /*) ;; *) __apane_t="";; esac`;
 			if (mode === "ssh") {
 				const remoteInit = cwd
-					? `cd -- ${quoteShell(cwd)} && ec=0 || ec=$?; ${ttySnip}; printf '__APANE_''READY_%s:%d:%s:%s:%s__\\n' '${id}' "$ec" "$$" "$__apane_t" "$PWD"; [ "$ec" -eq 0 ] || exit "$ec"; exec "\${SHELL:-/bin/sh}" -l`
+					? `cd -- ${quoteShellPath(cwd)} && ec=0 || ec=$?; ${ttySnip}; printf '__APANE_''READY_%s:%d:%s:%s:%s__\\n' '${id}' "$ec" "$$" "$__apane_t" "$PWD"; [ "$ec" -eq 0 ] || exit "$ec"; exec "\${SHELL:-/bin/sh}" -l`
 					: `${ttySnip}; printf '__APANE_''READY_%s:0:%s:%s:%s__\\n' '${id}' "$$" "$__apane_t" "$PWD"; exec "\${SHELL:-/bin/sh}" -l`;
 				const sshCmd = await this.#ssh.interactiveSshCommand(host, remoteInit);
 				await this.#herdr.runInPane(target, paneId, sshCmd);
 			} else {
 				const init = cwd
-					? `cd -- ${quoteShell(cwd)} && ec=0 || ec=$?; ${ttySnip}; printf '__APANE_''READY_%s:%d:%s:%s:%s__\\n' '${id}' "$ec" "$$" "$__apane_t" "$PWD"`
+					? `cd -- ${quoteShellPath(cwd)} && ec=0 || ec=$?; ${ttySnip}; printf '__APANE_''READY_%s:%d:%s:%s:%s__\\n' '${id}' "$ec" "$$" "$__apane_t" "$PWD"`
 					: `${ttySnip}; printf '__APANE_''READY_%s:0:%s:%s:%s__\\n' '${id}' "$$" "$__apane_t" "$PWD"`;
 				await this.#herdr.runInPane(target, paneId, init);
 			}
@@ -292,9 +295,9 @@ export class PaneService {
 				};
 			}
 
-			if (key && isControlKey(key)) {
+			if (key) {
 				await writeState(this.#paths, state);
-				throw new Error("cannot interrupt idle pane");
+				throw new Error(isControlKey(key) ? "cannot interrupt idle pane" : `cannot send key ${key} to idle pane`);
 			}
 
 			if (input.input.trim() === "") {
@@ -407,28 +410,31 @@ export class PaneService {
 			const raw = await this.readPaneSafe(target, pane, lines);
 			const parsed = parseJobOutput(raw, job.tok, job.mark);
 			if (parsed.done) {
+				const output = truncateOutput(parsed.output);
 				return {
 					id: pane.id,
 					status: "idle",
 					cwd: parsed.cwd ?? pane.cwd,
 					exit_code: parsed.exitCode,
-					output: truncateOutput(parsed.output),
+					...(output ? { output } : {}),
 				};
 			}
+			const output = truncateOutput(parsed.output.trimEnd());
 			return {
 				id: pane.id,
 				status: "idle",
 				cwd: job.doneCwd ?? pane.cwd,
 				...(job.exitCode !== undefined ? { exit_code: job.exitCode } : job.interrupted ? { interrupted: true } : {}),
-				output: truncateOutput(parsed.output.trimEnd()),
+				...(output ? { output } : {}),
 			};
 		}
 		const text = await this.readPaneSafe(target, pane, Math.min(lines, 500));
+		const output = truncateOutput(text.trimEnd());
 		return {
 			id: pane.id,
 			status: "idle",
 			cwd: pane.cwd,
-			output: truncateOutput(text.trimEnd()),
+			...(output ? { output } : {}),
 		};
 	}
 
@@ -512,6 +518,7 @@ export class PaneService {
 
 		const stalled = startTail !== undefined && !sawProgress;
 
+		const output = truncateOutput(tailLines(parsed.output, 80));
 		return {
 			id: record.id,
 			status: "busy",
@@ -519,7 +526,7 @@ export class PaneService {
 			...(lastProbe?.fg ? { fg: lastProbe.fg } : {}),
 			...(lastProbe?.tty ? { tty: lastProbe.tty } : {}),
 			...(stalled ? { stalled: true } : {}),
-			output: truncateOutput(tailLines(parsed.output, 80)),
+			...(output ? { output } : {}),
 		};
 	}
 
@@ -545,12 +552,13 @@ export class PaneService {
 				await writeState(this.#paths, state);
 			}
 		});
+		const output = truncateOutput(parsed.output);
 		return {
 			id: record.id,
 			status: "idle",
 			cwd: nextCwd,
 			exit_code: parsed.exitCode,
-			output: truncateOutput(parsed.output),
+			...(output ? { output } : {}),
 		};
 	}
 
@@ -576,12 +584,13 @@ export class PaneService {
 				await writeState(this.#paths, state);
 			}
 		});
+		const truncated = truncateOutput(output);
 		return {
 			id: record.id,
 			status: "idle",
 			cwd: nextCwd,
 			interrupted: true,
-			output: truncateOutput(output),
+			...(truncated ? { output: truncated } : {}),
 		};
 	}
 
@@ -861,13 +870,13 @@ function readDefaultTtl(env: NodeJS.ProcessEnv): number {
 }
 
 function normalizeTtl(value: number | undefined, fallback: number): number {
-	if (value === undefined) return fallback;
+	if (value === undefined || value === null) return fallback;
 	if (!Number.isInteger(value) || value < 0) throw new Error("ttl must be a non-negative integer");
 	return value;
 }
 
 function normalizeTimeout(value: number | undefined, fallback: number): number {
-	if (value === undefined) return fallback;
+	if (value === undefined || value === null) return fallback;
 	if (!Number.isInteger(value) || value < 1 || value > MAX_TIMEOUT_MS) {
 		throw new Error(`timeout_ms must be an integer between 1 and ${MAX_TIMEOUT_MS}`);
 	}
@@ -875,7 +884,7 @@ function normalizeTimeout(value: number | undefined, fallback: number): number {
 }
 
 function normalizeLines(value: number | undefined, fallback: number): number {
-	if (value === undefined) return fallback;
+	if (value === undefined || value === null) return fallback;
 	if (!Number.isInteger(value) || value < 1 || value > 10_000) {
 		throw new Error("lines must be an integer between 1 and 10000");
 	}
