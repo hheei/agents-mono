@@ -1,6 +1,6 @@
 {
   "mcpServers": {
-    "sshfs": {
+    "ssh": {
       "cwd": ".",
       "command": "bun",
       "args": ["./scripts/mcp.ts"]

@@ -1,0 +1,36 @@
+{
+  "name": "ssh",
+  "version": "0.8.0",
+  "description": "Stateful SSH/Herdr panes with sync/async exec and SFTP transfer.",
+  "author": {
+    "name": "hheei",
+    "url": "https://github.com/hheei"
+  },
+  "homepage": "https://github.com/hheei/agents-mono",
+  "repository": "https://github.com/hheei/agents-mono",
+  "license": "MIT",
+  "keywords": [
+    "ssh",
+    "sftp",
+    "herdr",
+    "pane",
+    "remote"
+  ],
+  "interface": {
+    "displayName": "SSH Panes",
+    "shortDescription": "Stateful remote shell panes over Herdr and SFTP.",
+    "longDescription": "Manage persistent 6-char hex SSH/Herdr shell panes with stateful cwd, sync/async command execution, lazy idle reclamation, and SFTP file transfer.",
+    "developerName": "hheei",
+    "category": "Productivity",
+    "capabilities": [
+      "MCP",
+      "SSH",
+      "SFTP"
+    ],
+    "websiteURL": "https://github.com/hheei/agents-mono",
+    "defaultPrompt": "Use ssh/spawn to open a persistent pane, ssh/exec and ssh/wait to run commands, ssh/download and ssh/upload for SFTP transfers, ssh/list to inspect active panes, and ssh/close when finished.",
+    "brandColor": "#111827",
+    "composerIcon": "./assets/icon.svg"
+  },
+  "mcpServers": "./.mcp.json"
+}

@@ -17,10 +17,10 @@
       "category": "Productivity"
     },
     {
-      "name": "sshfs",
+      "name": "ssh",
       "source": {
         "source": "local",
-        "path": "./plugins/sshfs"
+        "path": "./plugins/ssh"
       },
       "policy": {
         "installation": "AVAILABLE",
