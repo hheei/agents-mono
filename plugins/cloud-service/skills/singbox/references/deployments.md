@@ -28,6 +28,13 @@ Discover the project's path, publication mechanism, subscription URL, credential
 and service owner when needed. Keep secret subscription URLs out of this skill.
 Test service availability over SSH without mounting other hosts.
 
+`sub-hheei-cc` renders the sing-box Tailscale endpoint and Tailnet DNS/route
+overlay; it does not own a static DERP map. Keep custom DERP-site knowledge in
+[Tailnet topology](topology.md#derp-sites-and-campus-egress), rather than
+injecting historical DERP hosts into the subscription template. In particular,
+do not treat the Tencent-Shanghai historical domain as a node or regenerate its
+DERP deployment from a subscription change.
+
 ## Owner's Mac: SFM and profile sources
 
 Applies to the `supercgor` account's deployment, not every SFM host.
@@ -124,9 +131,25 @@ Applies to Judy's `chlo` account and system service.
 | Service | `/etc/systemd/system/singbox.service` |
 | Binary | `/home/chlo/.local/bin/sing-box` |
 | Working directory | `/home/chlo/.config/singbox` |
-| Deployed profile | `/home/chlo/.config/singbox/cn-ts.json` |
-| Capture interface | `singbox0` |
+| Live profile | `/home/chlo/.config/singbox/sub-hheei-cc.json` |
+| Refresh | `ExecStartPre` runs `/home/chlo/.config/singbox/refresh-sub.sh` |
+| Subscription URL file | `/home/chlo/.config/singbox/subscription.url` (mode 600; do not copy the token into this skill) |
+| Capture interface | TUN from the subscription (`auto_route` + `auto_redirect`) |
 | Mixed listener | `127.0.0.1:7890` |
+| Tailscale | embedded `ts-ep` with `system_interface: true` / `tailscale0` when the URL includes `tailscale=yes&iface=yes` |
+
+Do **not** hand-edit Judy's live JSON for node or Tailscale flags. Change the published `sub-hheei-cc` worker, then let `refresh-sub.sh` pull it. The script downloads over `eno1` when that NIC exists, runs `sing-box check` plus required-field checks (`ts-ep.system_interface`, tun `auto_redirect`), installs the new file only on success, and otherwise keeps the previous live file. A copy of the last successful live file is `sub-hheei-cc.json.last-good`. `cn-ts.json` is retained local history, not the running `-c`.
+
+`eno1` is Judy's preferred wired route and `wlp9s0` is the higher-metric Wi-Fi
+fallback. Treat their education-network and telecom-carrier labels as a current
+path hypothesis, not a routing rule: TProxy may capture a normal probe and send
+it through a different outbound. For any Oracle DERP or Hysteria decision,
+record the selected interface, a no-proxy physical-path result, and the actual
+application result. `🇸🇬 Hheei-1` is the current `✨ Default` selector and
+`🇰🇷 Hheei-3` has the same Hysteria port-hopping range, but neither fact proves
+the other node's bidirectional UDP health. Do not alter the shared subscription
+or deploy a DERP on `tencent-sh` as a workaround; see [Tailnet topology](topology.md#derp-sites-and-campus-egress).
+
 Confirm the effective unit (including overrides), binary version, and source
 ownership before editing. Validate a staged profile with the service's binary
 and working directory, then use `singbox.service` for an authorized restart.
@@ -158,3 +181,6 @@ Applies to overseas cloud servers (`tencent-kr`, `oracle-kr`, `oracle-sg`, `tenc
 
 - **Direct egress:** These nodes have native unrestricted international connectivity and operate with **direct connection** (`direct`), without tunneling through local sing-box client proxies.
 - Hosted workloads (AxonHub, CPA, Docker stacks) route directly to upstream services or across Tailnet peers.
+
+`oracle-kr` is the Korea A1 guest (CPA + VLESS `kr.link.hheei.cc`). OCI tenancy,
+disk, and SSH-alias ownership live in the `oci` skill.

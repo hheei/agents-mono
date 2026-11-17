@@ -29,6 +29,48 @@ proxy) may complete a local TCP handshake while the Tailnet path is blackholed.
 Native `tailscale` / `tailscaled` is a different node when present. Do not use
 one runtime as proof of the other.
 
+## DERP sites and campus egress
+
+These are custom DERP site records, not a guarantee that a client currently
+uses one of them. Revalidate DNS, TLS, UDP/STUN, and an application path before
+calling a site healthy; do not record or depend on historical public IPs here.
+
+**Current owner report (2026-09-23): DERP servers are disabled.** This status has
+not been independently checked per host; treat all custom DERP sites below as
+unavailable until their individual service and client paths are revalidated. This
+supersedes the older running-container notes in this table.
+
+| Location / host | DERP domain | Current listener / operating boundary |
+| --- | --- | --- |
+| Oracle Korea (`oracle-kr`) | `derp-kr.hheei.cc` | Reported disabled; verify the current service and path before selecting it. |
+| Oracle Singapore (`oracle-sg`) | `derp-sg.hheei.cc` | Reported disabled; verify the current service and path before selecting it. |
+| Tencent Shanghai (`tencent-sh`) | `derp.hheei.cc` | Retired historical domain (no current DNS record). There is no DERP there and it must **not** be redeployed: mainland TLS conditions make this an unsupported site. |
+
+Judy currently has two locally configured uplinks: wired `eno1` is the preferred
+default route and campus Wi-Fi `wlp9s0` is the higher-metric fallback. The
+site's operational classification is wired education-network versus Wi-Fi
+telecom egress. Report the active interface and verify the physical, no-proxy
+path for the intended Oracle address before choosing a DERP hypothesis: TProxy
+can make an ordinary client probe appear successful through another outbound.
+Never interpret a wired-path failure as proof that an Oracle DERP site is down,
+or try to restore `derp.hheei.cc` on Tencent Shanghai as a workaround.
+
+## Campus UDP proxy evidence (not DERP)
+
+Do not generalize an Oracle constraint to all overseas proxy paths. The current
+subscription defines `🇸🇬 Hheei-1` and `🇰🇷 Hheei-3` as Hysteria 2 nodes with
+UDP `28442` and hopping range `28442:28491`; their regional servers currently
+listen on UDP `28442`. `🇸🇬 Hheei-1` is the current `✨ Default` selector value
+and a bounded application request through Judy's mixed proxy succeeds. That
+does not prove the physical education-network route or either Oracle DERP site.
+
+For the dated Hheei-3 campus incident and a reusable synchronized capture
+procedure, see [Campus Hysteria 2 UDP path diagnosis](networking.md#campus-hysteria-2-udp-path-diagnosis).
+Do not label `🇰🇷 Hheei-3` healthy or failed from its configuration, listener,
+or an uncorrelated packet capture. Require one flow's client send, server
+receive, server reply, and client receive/failure evidence before classifying
+return-path UDP loss.
+
 ## Deployment ownership matrix
 
 This table records intended client ownership, not running state. Revalidate the
@@ -78,8 +120,7 @@ environment's file-access policy. The table records durable names and roles.
 | `buddy` | `mac-mini.bicolor-luma.ts.net` | Family Mac mini; default SSH user `buddy`, NAS automount user `kings` |
 | `nscc` | campus LAN via Judy SOCKS | Reached with Judy as `ProxyCommand`; not a Tailnet node |
 
-Other SSH hosts (`sccpu`, `scdcu`, `nscc`) may be campus or public aliases.
-Confirm Tailnet membership separately from the client implementation above.
+Public-IP Oracle guests (`oracle-kr`, `oracle-sg`) are SSH aliases whose compute ownership lives in the `oci` fleet map. Confirm Tailnet membership separately from the client implementation above.
 
 ## Reachability layers
 

@@ -1,13 +1,16 @@
 # Cloud Service
 
 Operational skills for this private cloud stack: AxonHub/CLIProxyAPI,
-sing-box/SFM, native and embedded Tailscale, and related host maintenance.
+Oracle Cloud compute, sing-box/SFM, native and embedded Tailscale, and related
+host maintenance.
 
 ## Skills
 
 | Skill | Use it for |
 | --- | --- |
 | `axonhub` | AxonHub health, deployment, PostgreSQL-backed gateway data, `api.lmxu.cc` relay, and CLIProxyAPI operations |
+| `oci` | Oracle Cloud tenancies, Always Free quota, IPv6, instance/volume/VNIC ops, `oracle-kr` / `oracle-sg` fleet |
+| `gpt-load` | GPT-Load on `oracle-kr`, Docker Compose, Tailnet-only access, backup, upgrade, and troubleshooting |
 | `singbox` | Profile changes, TUN/DNS/routing diagnostics, Tailnet topology, KingNAS SMB over Tailscale, subscription updates |
 
 Each skill keeps portable workflow in `SKILL.md` and host-specific ownership in
@@ -15,6 +18,7 @@ its deployment reference. The sing-box skill additionally carries networking,
 topology, and selected upstream documentation snapshots.
 
 - `skills/axonhub/references/deployments.md` — AxonHub, public relay, and CPA ownership map
+- `skills/oci/references/fleet.md` — Singapore vs Korea tenancy split, SSH aliases, disk intent, IPv6 prefixes
 - `skills/singbox/references/networking.md` — platform procedures and the offline official-docs index
 - `skills/singbox/references/policy-tuning.md` — SPA asset protection, build-time YAML aggregation, version-scoped NAT/DNS tuning, QUIC and portable-network tradeoffs
 - `skills/singbox/references/deployments.md` — Judy's shared `sub-hheei-cc` subscription source and Mac / Judy / iPhone ownership hints

@@ -28,6 +28,9 @@ change networking. Use available native diagnostics and report the limitation.
   [Networking runbook](references/networking.md) for platform procedures,
   diagnostic boundaries, and the offline official-documentation index. Read local
   snapshots first; check their provenance and version scope before applying fields.
+- **Campus-specific Hysteria 2 / UDP proxy stalls:** read
+  [Campus UDP path diagnosis](references/networking.md#campus-hysteria-2-udp-path-diagnosis)
+  before attributing a failure to a node, NAT, or campus filtering.
 - **The owner's Mac, Judy, or iPhone profile work:** also read the matching section
   of [Local deployments](references/deployments.md) before inspecting or editing
   that deployment. Its paths are discovery hints, not proof of current state.
@@ -43,7 +46,7 @@ change networking. Use available native diagnostics and report the limitation.
   discovery before changing clients or routes. Revalidate addresses and health.
 - **Node subscriptions on any computer:** read the shared subscription source
   section in [Local deployments](references/deployments.md#shared-subscription-source)
-  before changing generated nodes or a client's subscription ownership.
+- **Oracle Cloud compute, boot volumes, Always Free quota, or `oracle-kr` / `oracle-sg` fleet work:** use the `oci` skill and its fleet map. This skill only covers guest networking once SSH is already the right alias.
 
 ## Safety
 
@@ -143,6 +146,27 @@ groups; `set_sfm_route.py` leaves the requested selection in place.
 `test_sfm_routes.py` attempts restoration in `finally`, but both switching
 helpers close **all** controller connections. Treat them as disruptive operations
 requiring explicit authorization, not read-only probes.
+
+Typical usage from the plugin's `skills/singbox` directory:
+
+```sh
+# Read current groups and selector choices.
+python3 scripts/list_sfm_routes.py
+
+# Test several routes through the local mixed proxy; restores the original choice.
+export CLASH_SELECTOR='<discovered selector name>'
+python3 scripts/test_sfm_routes.py 'https://example.com/' '<route A>' '<route B>'
+
+# Explicitly change and keep the selector on a route.
+python3 scripts/set_sfm_route.py '<selector name>' '<route name>'
+```
+
+Override `CLASH_API` only when the controller is not at `http://127.0.0.1:9090`.
+If authentication is enabled, provide `CLASH_API_SECRET` through the environment
+(do not place the token in command arguments or saved examples). Verify the
+selected route with a follow-up listing. Route tests restore the original choice
+on exit when possible, but can still leave the new route selected if restoration
+fails; they also close all current controller connections.
 
 `validate_config.py` requires an explicit config, compatible sing-box binary,
 and target working directory. It reports the engine check result without printing

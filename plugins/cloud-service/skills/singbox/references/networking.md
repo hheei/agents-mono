@@ -12,6 +12,91 @@ systemd. Missing utilities are diagnostic limitations, not installation requests
 An SSH alias is local to the initiating account; rediscover it on each machine.
 Run local checks directly when the target is the current host.
 
+## Campus Hysteria 2 UDP path diagnosis
+
+Use this when a Hysteria 2 node works on mobile data but stalls on campus Wi-Fi
+or wired access. Separate node/config health, client egress, server ingress,
+server response, client receipt, protocol handshake, and application success.
+Neither a TCP connect check nor a UDP packet/counter alone proves Hysteria 2 is
+usable. Do not infer a campus-wide block or a specific NAT defect without
+correlated evidence.
+
+### Correlated test procedure
+
+1. Record the active physical interface, scoped route to the node IP, SFM TUN,
+   selector/group value, resolved endpoint IP, and a stable clock on client and
+   server. A default route via a TUN does not imply a scoped physical probe uses
+   it. Test the actual interface in use; do not assume Wi-Fi from `en0` alone.
+2. Preserve the selector's original value. With authorization for a temporary
+   route test, select only the affected Hysteria 2 node using the Clash API,
+   clear old connections, then issue exactly one bounded application request
+   through the local mixed proxy. Restore the selector and clear connections in
+   a `finally`/shell `trap`, and verify restoration.
+3. During that request, capture client ingress/egress on the physical interface
+   and server ingress/egress on the public NIC, using numeric addresses, packet
+   timestamps, and enough packet bytes to distinguish flows. Use synchronized
+   clocks or epoch timestamps. Save the client source port, server destination
+   port, NAT-translated public source port, and server-NIC ingress port; inspect
+   DNAT/redirect rules to determine the listener port after translation. Correlate
+   the same flow across both captures. Port hopping and
+   campus CGNAT can change the visible tuple. Concurrent health checks or other
+   clients can create indistinguishable noise, so compare timing/sequence/payload
+   evidence as well as port numbers.
+4. Correlate the packet evidence with the live SFM connection chain and narrowly
+   scoped sing-box logs from the same test. Identify which stage failed:
+   selection/routing, name resolution, socket send, server receipt, Hysteria 2
+   handshake, tunneled DNS/application request, or reply to the client.
+
+Interpretation requires a complete same-flow chain:
+
+| Evidence | Supported conclusion |
+| --- | --- |
+| Client sees no outbound packet | Failure is before physical-interface egress; inspect active route, bind/interface, TUN and dial logs. |
+| Client outbound, no matching server ingress | Loss is somewhere between the capture points; not proof of a carrier/prefix-wide block. |
+| Server receives request, no matching server response | Inspect server listener, Hysteria 2 logs, host/cloud firewall and service behavior. |
+| Server response, no matching client ingress | Return-path loss is established between the server capture point and client interface; exact network device still requires more observation. |
+| Client receives response but Hysteria 2 handshake fails | Inspect Hysteria 2 protocol settings/version/auth/TLS/obfs and matching service logs. |
+| Hysteria 2 handshake succeeds but application fails | Inspect proxy DNS, route rules, outbound egress, and destination-specific behavior. |
+
+Do not count a server packet from the same public campus NAT address as the
+client's flow until the translated tuple and time/packet identity match. A
+server-side capture may observe packets before/after DNAT/SNAT at different
+stages; record the interface and understand the local redirect rules. Firewall
+allow counters prove rule matches, not a completed handshake. UDP replies seen
+at the server do not prove delivery to the client.
+
+### Dated observation: owner's Mac, PKU campus Wi-Fi, 2026-09-23
+
+This is a time-bounded incident record, not a permanent diagnosis of campus
+policy or current node health:
+
+- The Mac's Wi-Fi device was `en0` with `192.168.31.18`; SFM used `utun6` as
+  system default, while a scoped route to H3's then-resolved IPv4
+  `152.67.196.225` used gateway `192.168.31.1` via `en0`. The active egress
+  context must be rechecked each run.
+- A direct, no-proxy TCP test to H4 `:28443` timed out. On one test the Oracle-KR
+  guest capture saw that TCP SYN and its SYN-ACK, with repeated SYNs and no ACK
+  at the guest. This establishes a TCP handshake failure for that test only;
+  do not transfer it to H3 UDP.
+- H3 was a Hysteria 2 outbound; Oracle-KR's then-running sing-box listener was
+  UDP `28442`, and nftables redirected the configured UDP hop range
+  `28442-28491` to that listener. This explains why client and server capture
+  tuples differ; it does not establish that port hopping is the failure.
+- Bounded YouTube `generate_204` probes through SFM with H3 selected failed
+  before TLS completion; with the same profile on mobile data, earlier probes
+  had returned HTTP 204. This supports a network-path-dependent difference but
+  is not itself a protocol-layer diagnosis.
+- Campus H3 captures saw outbound client UDP, and separate Oracle captures saw
+  UDP in both directions from the campus public egress `162.105.151.164`. The
+  captures included multiple translated ports/flows and were not tied
+  one-to-one to the failed application request. **They do not yet prove that a
+  reply to that specific request was lost before the Mac.** The precise H3
+  failure stage and campus network drop point remain unresolved.
+- Do not call this a CERNET-wide Oracle-prefix block, confirmed H3 return-path
+  loss, or a bad Hysteria 2 config until a same-flow capture and matching SFM /
+  server protocol logs establish that claim. The established working server
+  listener and firewall counters are not protocol success evidence.
+
 ## SFM profile ownership and activation
 
 The GUI and packet-tunnel runtime have different lifecycles. An absent SFM GUI

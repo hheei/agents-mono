@@ -1,0 +1,35 @@
+{
+  "name": "knowledge",
+  "version": "0.1.0",
+  "description": "Import STEM textbooks as structured courses and study them interactively.",
+  "author": {
+    "name": "hheei",
+    "url": "https://github.com/hheei"
+  },
+  "homepage": "https://github.com/hheei/codex-mono",
+  "repository": "https://github.com/hheei/codex-mono",
+  "license": "MIT",
+  "keywords": [
+    "textbook",
+    "stem",
+    "course",
+    "tutor"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Knowledge",
+    "shortDescription": "Turn textbooks into courses and study them step by step.",
+    "longDescription": "Knowledge imports PDF and other textbook sources into progressively loaded course files with chapter order, prerequisites, equations, derivation flows, examples, and source pages, then teaches one concept at a time with hint-first checks for understanding.",
+    "developerName": "hheei",
+    "category": "Education",
+    "capabilities": [
+      "Document Extraction",
+      "STEM Learning",
+      "Interactive Tutoring"
+    ],
+    "defaultPrompt": [
+      "Use $knowledge-import to turn this textbook PDF into a course.",
+      "Use $knowledge-study to teach me this course in chapter order."
+    ]
+  }
+}

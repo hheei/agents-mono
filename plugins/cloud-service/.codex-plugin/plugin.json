@@ -1,7 +1,7 @@
 {
   "name": "cloud-service",
-  "version": "0.3.0",
-  "description": "Operational skills for AxonHub/CLIProxyAPI, sing-box/SFM, Tailscale topology, and related cloud-service maintenance.",
+  "version": "0.3.1",
+  "description": "Operational skills for AxonHub/CLIProxyAPI, OCI compute, sing-box/SFM, Tailscale topology, and related cloud-service maintenance.",
   "author": {
     "name": "hheei",
     "url": "https://github.com/hheei"
@@ -12,6 +12,8 @@
   "keywords": [
     "axonhub",
     "cliproxyapi",
+    "gpt-load",
+    "oci",
     "sing-box",
     "sfm",
     "tailscale",
@@ -20,8 +22,8 @@
   "skills": "./skills/",
   "interface": {
     "displayName": "Cloud Service",
-    "shortDescription": "Operate AxonHub, CLIProxyAPI, sing-box, and Tailscale services.",
-    "longDescription": "Reusable operational guidance for the AxonHub AI gateway and CLIProxyAPI upstream, sing-box/SFM profiles, TUN routing, Tailscale endpoints and MagicDNS, DNS policy, selector changes, and subscription updates.",
+    "shortDescription": "Operate GPT-Load, AxonHub, OCI compute, sing-box, and Tailscale services.",
+    "longDescription": "Reusable operational guidance for GPT-Load on oracle-kr, the AxonHub AI gateway and CLIProxyAPI upstream, Oracle Cloud tenancies and Always Free compute, sing-box/SFM profiles, TUN routing, Tailscale endpoints and MagicDNS, DNS policy, selector changes, and subscription updates.",
     "developerName": "hheei",
     "category": "Productivity",
     "capabilities": [
@@ -30,6 +32,8 @@
     ],
     "defaultPrompt": [
       "Use $axonhub to inspect or operate the AxonHub and CPA service path.",
+      "Use $gpt-load to operate GPT-Load on oracle-kr.",
+      "Use $oci to inspect or operate Oracle Cloud instances, volumes, and tenancy quota.",
       "Use $singbox to inspect SFM routing.",
       "Use $singbox to diagnose Tailnet reachability."
     ]
