@@ -393,9 +393,19 @@ describe("PaneService", () => {
 		expect(harness.herdrCalls).toContain("tab create");
 
 		harness.setRemotePwd("/Users/supercgor/repo/sub");
-		const execRes = await service.exec({ id: p1.id, cmd: "cd sub && echo hi" });
-		expect(execRes).toEqual({
+		const sendRes = await service.send({ id: p1.id, input: "cd sub && echo hi" });
+		expect(sendRes).toEqual({
 			id: p1.id,
+			status: "idle",
+			cwd: "/Users/supercgor/repo/sub",
+			exit_code: 0,
+			output: "hello world",
+		});
+
+		const inspected = await service.get({ id: p1.id });
+		expect(inspected).toEqual({
+			id: p1.id,
+			host: "mac",
 			status: "idle",
 			cwd: "/Users/supercgor/repo/sub",
 			exit_code: 0,
@@ -419,10 +429,10 @@ describe("PaneService", () => {
 
 		expect(await service.close({ id: p1.id })).toEqual({ id: p1.id, closed: true });
 		expect(await service.close({ id: p2.id })).toEqual({ id: p2.id, closed: true });
-		expect((await service.list()).panes).toHaveLength(0);
+		expect(await service.get()).toEqual({ panes: [] });
 	});
 
-	test("exec sends interactive text (y\\n) and keys (ctrl-c) while busy, and guards idle ctrl-c race", async () => {
+	test("send injects interactive text (y\\n) and keys (ctrl-c) while busy, and errors on idle ctrl-c", async () => {
 		const cache = await tempCache();
 		const harness = createHerdrHarness();
 		const service = new PaneService({
@@ -432,12 +442,12 @@ describe("PaneService", () => {
 
 		const p = await service.spawn({ host: "local", cwd: "/tmp" });
 
-		// 1. Interactive prompt resolved via exec("y\n")
+		// 1. Interactive prompt resolved via send("y\n")
 		harness.setDelayNextExec(true);
-		const busy1 = await service.exec({ id: p.id, cmd: "confirm", async: true });
+		const busy1 = await service.send({ id: p.id, input: "confirm", async: true });
 		expect(busy1.status).toBe("busy");
 
-		const answered = await service.exec({ id: p.id, cmd: "y\n" });
+		const answered = await service.send({ id: p.id, input: "y\n" });
 		expect(harness.sentTexts[0]).toEqual({ paneId: "w1:p1", text: "y\n" });
 		expect(answered).toEqual({
 			id: p.id,
@@ -447,22 +457,22 @@ describe("PaneService", () => {
 			output: "hello world\ny\nconfirmed",
 		});
 
-		// 2. Stuck command interrupted via exec("ctrl-c") -> idle with interrupted: true
-		const busy2 = await service.exec({ id: p.id, cmd: "sleep 30", async: true });
+		// 2. Stuck command interrupted via send("ctrl-c") -> idle with interrupted: true
+		const busy2 = await service.send({ id: p.id, input: "sleep 30", async: true });
 		expect(busy2.status).toBe("busy");
 
-		const interrupted = await service.exec({ id: p.id, cmd: "ctrl-c" });
+		const interrupted = await service.send({ id: p.id, input: "ctrl-c" });
 		expect(harness.sentKeys[0]).toEqual({ paneId: "w1:p1", keys: ["ctrl+c"] });
 		expect(interrupted.status).toBe("idle");
 		expect(interrupted.interrupted).toBe(true);
 		expect(interrupted.output).toContain("^C");
 
-		// 3. Race: ctrl-c arriving after pane already idle does not run command not found
-		const raced = await service.exec({ id: p.id, cmd: "ctrl-c" });
-		expect(raced).toEqual({ id: p.id, status: "idle", cwd: "/tmp", interrupted: true });
+		// 3. Interrupting an idle pane rejects clearly instead of running command in shell
+		await expect(service.send({ id: p.id, input: "ctrl-c" })).rejects.toThrow("cannot interrupt idle pane");
+		await expect(service.send({ id: p.id, input: "esc" })).rejects.toThrow("cannot interrupt idle pane");
 	});
 
-	test("wait reports fg, tty, and stalled on timeout and settles busy -> idle across reconcile", async () => {
+	test("get(id) inspects busy pane non-blockingly and wait settles busy -> idle across reconcile", async () => {
 		const cache = await tempCache();
 		const harness = createHerdrHarness({ remoteHerdrHosts: ["judy"] });
 		const service = new PaneService({
@@ -473,12 +483,28 @@ describe("PaneService", () => {
 		const spawned = await service.spawn({ host: "judy" });
 
 		harness.setDelayNextExec(true);
-		const busy = await service.exec({ id: spawned.id, cmd: "sudo id", async: true });
+		const busy = await service.send({ id: spawned.id, input: "sudo id", async: true });
 		expect(busy).toEqual({ id: spawned.id, status: "busy", cwd: "/home/user" });
 
 		const pane = harness.panes.get("w1:p1")!;
 		pane.fg = { name: "sudo", pid: 999 };
 		pane.stty = "lflags: icanon isig -echo";
+
+		const snap = await service.get({ id: spawned.id });
+		expect(snap).toEqual({
+			id: spawned.id,
+			host: "judy",
+			status: "busy",
+			cwd: "/home/user",
+			fg: "sudo",
+			tty: "noecho",
+			output: "hello world",
+		});
+
+		const all = await service.get();
+		expect(all).toEqual({
+			panes: [{ id: spawned.id, host: "judy", status: "busy", cwd: "/home/user", fg: "sudo" }],
+		});
 
 		const stillBusy = await service.wait({ id: spawned.id, timeout_ms: 50 });
 		expect(stillBusy).toEqual({
@@ -492,8 +518,10 @@ describe("PaneService", () => {
 		});
 
 		harness.completeLastDelayedJob("w1:p1", "/tmp/done", 0);
-		const listed = await service.list();
-		expect(listed.panes).toEqual([{ id: spawned.id, host: "judy", status: "idle", cwd: "/tmp/done" }]);
+		const listed = await service.get();
+		expect(listed).toEqual({
+			panes: [{ id: spawned.id, host: "judy", status: "idle", cwd: "/tmp/done" }],
+		});
 
 		const completed = await service.wait({ id: spawned.id });
 		expect(completed.status).toBe("idle");
@@ -512,7 +540,7 @@ describe("PaneService", () => {
 
 		const spawned = await service.spawn({ host: "local" });
 		harness.setWaitMiss(true);
-		const res = await service.exec({ id: spawned.id, cmd: "echo ok", timeout_ms: 50 });
+		const res = await service.send({ id: spawned.id, input: "echo ok", timeout_ms: 50 });
 		expect(res).toEqual({
 			id: spawned.id,
 			status: "idle",
@@ -537,8 +565,8 @@ describe("PaneService", () => {
 		expect(harness.panes.size).toBe(2);
 
 		nowMs += 61_000;
-		const listed = await service.list();
-		expect(listed.panes.map((p) => p.id)).toEqual([pinned.id]);
+		const listed = await service.get();
+		expect("panes" in listed && listed.panes.map((p) => p.id)).toEqual([pinned.id]);
 		expect(harness.panes.size).toBe(1);
 	});
 

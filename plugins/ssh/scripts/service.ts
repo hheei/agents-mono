@@ -41,10 +41,12 @@ export interface PaneInfo {
 	host: string;
 	status: "idle" | "busy";
 	cwd: string;
+	fg?: string;
 }
 
-export interface ExecResult {
+export interface PaneResult {
 	id: string;
+	host?: string;
 	status: "idle" | "busy";
 	cwd: string;
 	exit_code?: number;
@@ -54,6 +56,8 @@ export interface ExecResult {
 	stalled?: boolean;
 	output?: string;
 }
+
+export type GetResult = { panes: PaneInfo[] } | PaneResult;
 
 export interface CloseResult {
 	id: string;
@@ -95,12 +99,57 @@ export class PaneService {
 		this.#now = opts.now ?? (() => Date.now());
 	}
 
-	async list(): Promise<{ panes: PaneInfo[] }> {
-		return await withStateLock(this.#paths, async () => {
-			const state = await this.reconcileAndGc();
+	async get(input: { id?: string; lines?: number } = {}): Promise<GetResult> {
+		const rawId = optString(input.id, "id");
+		if (!rawId) {
+			return await withStateLock(this.#paths, async () => {
+				const { state, fgMap } = await this.reconcileAndGc();
+				await writeState(this.#paths, state);
+				return { panes: state.panes.map((p) => toInfo(p, fgMap.get(p.id))) };
+			});
+		}
+
+		const id = validateHexId(rawId);
+		const lines = normalizeLines(input.lines, 2000);
+		const snap = await withStateLock(this.#paths, async () => {
+			const { state, fgMap } = await this.reconcileAndGc();
+			const pane = findPaneOrThrow(state, id);
 			await writeState(this.#paths, state);
-			return { panes: state.panes.map(toInfo) };
+			return { pane: structuredClone(pane), fg: fgMap.get(id) };
 		});
+
+		const { pane } = snap;
+		const target = targetFor(pane);
+		if (pane.status === "busy" && pane.job) {
+			const probe = await this.probeForeground(pane).catch(() => undefined);
+			if (probe && !probe.alive) {
+				await this.dropPane(id);
+				throw new Error(`Pane ${id} exited`);
+			}
+			const raw = await this.readPaneSafe(target, pane, lines);
+			const parsed = parseJobOutput(raw, pane.job.tok, pane.job.mark);
+			if (parsed.done) {
+				const finished = await this.finishDone(pane, pane.job.tok, parsed);
+				return { ...finished, host: pane.host };
+			}
+			if (probe && !probe.busy) {
+				const interrupted = await this.finishInterrupted(pane, pane.job.tok, probe.cwd ?? pane.cwd, parsed.output);
+				return { ...interrupted, host: pane.host };
+			}
+			const fg = probe?.fg ?? snap.fg;
+			return {
+				id,
+				host: pane.host,
+				status: "busy",
+				cwd: probe?.cwd ?? pane.cwd,
+				...(fg ? { fg } : {}),
+				...(probe?.tty ? { tty: probe.tty } : {}),
+				output: truncateOutput(input.lines === undefined ? tailLines(parsed.output, 80) : parsed.output),
+			};
+		}
+
+		const settled = await this.readSettledPane(pane, lines);
+		return { ...settled, host: pane.host };
 	}
 
 	async spawn(input: { host: string; cwd?: string; ttl?: number }): Promise<PaneInfo> {
@@ -128,7 +177,7 @@ export class PaneService {
 		}
 
 		const id = await withStateLock(this.#paths, async () => {
-			const state = await this.reconcileAndGc();
+			const { state } = await this.reconcileAndGc();
 			const allocated = generateHexId(state.panes.map((p) => p.id));
 			await writeState(this.#paths, state);
 			return allocated;
@@ -207,30 +256,30 @@ export class PaneService {
 		}
 	}
 
-	async exec(input: {
+	async send(input: {
 		id: string;
-		cmd: string;
+		input: string;
 		async?: boolean;
 		timeout_ms?: number;
-	}): Promise<ExecResult> {
+	}): Promise<PaneResult> {
 		const id = validateHexId(reqString(input.id, "id"));
-		if (typeof input.cmd !== "string" || input.cmd.length === 0 || input.cmd.includes("\0")) {
-			throw new Error("cmd must be a non-empty string without NUL");
+		if (typeof input.input !== "string" || input.input.length === 0 || input.input.includes("\0")) {
+			throw new Error("input must be a non-empty string without NUL");
 		}
 		const runAsync = input.async === true;
 		const timeoutMs = normalizeTimeout(input.timeout_ms, DEFAULT_SYNC_MS);
 
 		const plan = await withStateLock(this.#paths, async () => {
-			const state = await this.reconcileAndGc();
+			const { state } = await this.reconcileAndGc();
 			const pane = findPaneOrThrow(state, id);
 			const target = targetFor(pane);
-			const key = parseKeyToken(input.cmd);
+			const key = parseKeyToken(input.input);
 
 			if (pane.status === "busy" && pane.job) {
 				if (key) {
 					await this.#herdr.sendKeys(target, pane.paneId, [key]);
 				} else {
-					await this.#herdr.sendText(target, pane.paneId, input.cmd.replaceAll("\r\n", "\n"));
+					await this.#herdr.sendText(target, pane.paneId, input.input.replaceAll("\r\n", "\n"));
 				}
 				pane.usedAt = this.#now();
 				await writeState(this.#paths, state);
@@ -244,22 +293,17 @@ export class PaneService {
 			}
 
 			if (key && isControlKey(key)) {
-				await this.#herdr.sendKeys(target, pane.paneId, [key]).catch(() => undefined);
-				pane.usedAt = this.#now();
 				await writeState(this.#paths, state);
-				return {
-					kind: "idle-key" as const,
-					record: structuredClone(pane),
-				};
+				throw new Error("cannot interrupt idle pane");
 			}
 
-			if (input.cmd.trim() === "") {
-				throw new Error("cmd must be a non-empty string");
+			if (input.input.trim() === "") {
+				throw new Error("input must be a non-empty string when pane is idle");
 			}
 
 			const usedToks = state.panes.flatMap((p) => (p.job ? [p.id, p.job.tok] : [p.id]));
 			const tok = generateHexId(usedToks);
-			const scriptPath = await this.#ssh.writeJobScript(pane.host, tok, input.cmd);
+			const scriptPath = await this.#ssh.writeJobScript(pane.host, tok, input.input);
 			const mark = `__APANE_START_${tok}__`;
 			const launch = `printf '__APANE_''START_%s__\\n' '${tok}'; . ${quoteShell(scriptPath)}; __apane_ec=$?; rm -f ${quoteShell(scriptPath)}; printf '\\n__APANE_''DONE_%s:%d:%s__\\n' '${tok}' "$__apane_ec" "$PWD"`;
 
@@ -278,17 +322,6 @@ export class PaneService {
 			};
 		});
 
-		if (plan.kind === "idle-key") {
-			const job = plan.record.lastJob;
-			return {
-				id,
-				status: "idle",
-				cwd: plan.record.cwd,
-				...(job?.exitCode !== undefined ? { exit_code: job.exitCode } : {}),
-				...(job?.interrupted ? { interrupted: true } : {}),
-			};
-		}
-
 		if (runAsync) {
 			return {
 				id,
@@ -300,48 +333,20 @@ export class PaneService {
 		return await this.awaitJob(plan.record, plan.tok, plan.mark, timeoutMs, 2000, { fastProbe: plan.fastProbe });
 	}
 
-	async wait(input: { id: string; timeout_ms?: number; lines?: number }): Promise<ExecResult> {
+	async wait(input: { id: string; timeout_ms?: number; lines?: number }): Promise<PaneResult> {
 		const id = validateHexId(reqString(input.id, "id"));
 		const timeoutMs = normalizeTimeout(input.timeout_ms, DEFAULT_WAIT_MS);
 		const lines = normalizeLines(input.lines, 2000);
 
 		const snap = await withStateLock(this.#paths, async () => {
-			const state = await this.reconcileAndGc();
+			const { state } = await this.reconcileAndGc();
 			const pane = findPaneOrThrow(state, id);
 			await writeState(this.#paths, state);
 			return structuredClone(pane);
 		});
 
 		if (snap.status === "idle" || !snap.job) {
-			const target = targetFor(snap);
-			if (snap.lastJob) {
-				const job = snap.lastJob;
-				const raw = await this.readPaneSafe(target, snap, lines);
-				const parsed = parseJobOutput(raw, job.tok, job.mark);
-				if (parsed.done) {
-					return {
-						id,
-						status: "idle",
-						cwd: parsed.cwd ?? snap.cwd,
-						exit_code: parsed.exitCode,
-						output: truncateOutput(parsed.output),
-					};
-				}
-				return {
-					id,
-					status: "idle",
-					cwd: job.doneCwd ?? snap.cwd,
-					...(job.exitCode !== undefined ? { exit_code: job.exitCode } : job.interrupted ? { interrupted: true } : {}),
-					output: truncateOutput(parsed.output.trimEnd()),
-				};
-			}
-			const text = await this.readPaneSafe(target, snap, Math.min(lines, 500));
-			return {
-				id,
-				status: "idle",
-				cwd: snap.cwd,
-				output: truncateOutput(text.trimEnd()),
-			};
+			return await this.readSettledPane(snap, lines);
 		}
 
 		return await this.awaitJob(snap, snap.job.tok, snap.job.mark, timeoutMs, lines);
@@ -354,7 +359,7 @@ export class PaneService {
 		if (local) assertNoControlChars(local, "local");
 
 		const pane = await withStateLock(this.#paths, async () => {
-			const state = await this.reconcileAndGc();
+			const { state } = await this.reconcileAndGc();
 			const found = findPaneOrThrow(state, id);
 			found.usedAt = this.#now();
 			await writeState(this.#paths, state);
@@ -370,7 +375,7 @@ export class PaneService {
 		if (remote) assertNoControlChars(remote, "remote");
 
 		const pane = await withStateLock(this.#paths, async () => {
-			const state = await this.reconcileAndGc();
+			const { state } = await this.reconcileAndGc();
 			const found = findPaneOrThrow(state, id);
 			found.usedAt = this.#now();
 			await writeState(this.#paths, state);
@@ -382,7 +387,7 @@ export class PaneService {
 	async close(input: { id: string }): Promise<CloseResult> {
 		const id = validateHexId(reqString(input.id, "id"));
 		return await withStateLock(this.#paths, async () => {
-			const state = await this.reconcileAndGc();
+			const { state } = await this.reconcileAndGc();
 			const idx = state.panes.findIndex((p) => p.id === id);
 			if (idx < 0) {
 				await writeState(this.#paths, state);
@@ -395,6 +400,38 @@ export class PaneService {
 		});
 	}
 
+	private async readSettledPane(pane: PaneRecord, lines: number): Promise<PaneResult> {
+		const target = targetFor(pane);
+		if (pane.lastJob) {
+			const job = pane.lastJob;
+			const raw = await this.readPaneSafe(target, pane, lines);
+			const parsed = parseJobOutput(raw, job.tok, job.mark);
+			if (parsed.done) {
+				return {
+					id: pane.id,
+					status: "idle",
+					cwd: parsed.cwd ?? pane.cwd,
+					exit_code: parsed.exitCode,
+					output: truncateOutput(parsed.output),
+				};
+			}
+			return {
+				id: pane.id,
+				status: "idle",
+				cwd: job.doneCwd ?? pane.cwd,
+				...(job.exitCode !== undefined ? { exit_code: job.exitCode } : job.interrupted ? { interrupted: true } : {}),
+				output: truncateOutput(parsed.output.trimEnd()),
+			};
+		}
+		const text = await this.readPaneSafe(target, pane, Math.min(lines, 500));
+		return {
+			id: pane.id,
+			status: "idle",
+			cwd: pane.cwd,
+			output: truncateOutput(text.trimEnd()),
+		};
+	}
+
 	private async awaitJob(
 		record: PaneRecord,
 		tok: string,
@@ -402,7 +439,7 @@ export class PaneService {
 		timeoutMs: number,
 		lines: number,
 		opts: { fastProbe?: boolean } = {},
-	): Promise<ExecResult> {
+	): Promise<PaneResult> {
 		const target = targetFor(record);
 		const doneRe = `^__APANE_DONE_${tok}:[0-9]+:.*__$`;
 		const startRev = (await this.#herdr.getPane(target, record.paneId).catch(() => undefined))?.revision;
@@ -478,7 +515,7 @@ export class PaneService {
 		record: PaneRecord,
 		tok: string,
 		parsed: { done: boolean; exitCode?: number; cwd?: string; output: string },
-	): Promise<ExecResult> {
+	): Promise<PaneResult> {
 		const nextCwd = parsed.cwd ?? record.cwd;
 		await withStateLock(this.#paths, async () => {
 			const state = await readState(this.#paths);
@@ -510,7 +547,7 @@ export class PaneService {
 		tok: string,
 		nextCwd: string,
 		output: string,
-	): Promise<ExecResult> {
+	): Promise<PaneResult> {
 		await withStateLock(this.#paths, async () => {
 			const state = await readState(this.#paths);
 			const pane = state.panes.find((p) => p.id === record.id);
@@ -601,9 +638,10 @@ export class PaneService {
 		await this.dropPane(id);
 	}
 
-	private async reconcileAndGc(): Promise<PaneStateFile> {
+	private async reconcileAndGc(): Promise<{ state: PaneStateFile; fgMap: Map<string, string> }> {
 		const state = await readState(this.#paths);
-		if (state.panes.length === 0) return state;
+		const fgMap = new Map<string, string>();
+		if (state.panes.length === 0) return { state, fgMap };
 
 		const liveByTarget = new Map<HerdrTarget, Map<string, HerdrPane>>();
 		for (const target of new Set<HerdrTarget>(state.panes.map(targetFor))) {
@@ -663,6 +701,8 @@ export class PaneService {
 							doneCwd: nextCwd,
 						};
 						pane.job = undefined;
+					} else if (probed?.fg) {
+						fgMap.set(pane.id, probed.fg);
 					}
 				}
 			}
@@ -678,7 +718,7 @@ export class PaneService {
 			kept.push(pane);
 		}
 
-		return { version: 1, panes: kept };
+		return { state: { version: 1, panes: kept }, fgMap };
 	}
 }
 
@@ -692,12 +732,13 @@ function findPaneOrThrow(state: PaneStateFile, id: string): PaneRecord {
 	return pane;
 }
 
-function toInfo(pane: PaneRecord): PaneInfo {
+function toInfo(pane: PaneRecord, fg?: string): PaneInfo {
 	return {
 		id: pane.id,
 		host: pane.host,
 		status: pane.status,
 		cwd: pane.cwd,
+		...(fg ? { fg } : {}),
 	};
 }
 

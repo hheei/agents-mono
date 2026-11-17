@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 
 import { optString, validateHexId, validateHost } from "./process";
-import { type CloseResult, type ExecResult, type PaneInfo, PaneService } from "./service";
+import { type CloseResult, type GetResult, type PaneInfo, type PaneResult, PaneService } from "./service";
 import type { TransferResult } from "./ssh";
 
 type JsonRpcId = string | number | null;
@@ -21,10 +21,10 @@ interface JsonRpcResponse {
 }
 
 interface McpServerOptions {
-	list?: () => Promise<{ panes: PaneInfo[] }>;
+	get?: (input: { id?: string; lines?: number }) => Promise<GetResult>;
 	spawn?: (input: { host: string; cwd?: string; ttl?: number }) => Promise<PaneInfo>;
-	exec?: (input: { id: string; cmd: string; async?: boolean; timeout_ms?: number }) => Promise<ExecResult>;
-	wait?: (input: { id: string; timeout_ms?: number; lines?: number }) => Promise<ExecResult>;
+	send?: (input: { id: string; input: string; async?: boolean; timeout_ms?: number }) => Promise<PaneResult>;
+	wait?: (input: { id: string; timeout_ms?: number; lines?: number }) => Promise<PaneResult>;
 	download?: (input: { id: string; remote: string; local?: string }) => Promise<TransferResult>;
 	upload?: (input: { id: string; local: string; remote?: string }) => Promise<TransferResult>;
 	close?: (input: { id: string }) => Promise<CloseResult>;
@@ -35,9 +35,17 @@ const SERVER_INFO = { name: "ssh", version: "0.8.0" };
 
 const TOOLS = [
 	{
-		name: "list",
-		description: "List active panes (id, host, status, cwd).",
-		inputSchema: { type: "object", properties: {}, required: [], additionalProperties: false },
+		name: "get",
+		description: "List all panes, or inspect one pane's state, fg/tty, and recent output.",
+		inputSchema: {
+			type: "object",
+			properties: {
+				id: { type: "string", pattern: "^[0-9a-f]{6}$" },
+				lines: { type: "integer", minimum: 1, maximum: 10000 },
+			},
+			required: [],
+			additionalProperties: false,
+		},
 	},
 	{
 		name: "spawn",
@@ -54,23 +62,23 @@ const TOOLS = [
 		},
 	},
 	{
-		name: "exec",
-		description: "Run cmd in idle pane, or send interactive text/keys (e.g. 'y\\n', 'ctrl-c') when busy.",
+		name: "send",
+		description: "Run cmd in idle pane (sync wait or async), or send interactive text/keys (e.g. 'y\\n', 'ctrl-c') when busy.",
 		inputSchema: {
 			type: "object",
 			properties: {
 				id: { type: "string", pattern: "^[0-9a-f]{6}$" },
-				cmd: { type: "string", minLength: 1 },
+				input: { type: "string", minLength: 1 },
 				async: { type: "boolean" },
 				timeout_ms: { type: "integer", minimum: 1, maximum: 300000 },
 			},
-			required: ["id", "cmd"],
+			required: ["id", "input"],
 			additionalProperties: false,
 		},
 	},
 	{
 		name: "wait",
-		description: "Wait for a busy pane to become idle, or read recent output.",
+		description: "Wait for a busy pane to become idle.",
 		inputSchema: {
 			type: "object",
 			properties: {
@@ -127,9 +135,9 @@ const TOOLS = [
 export function createMcpServer(opts: McpServerOptions = {}) {
 	const service = new PaneService();
 	const ops = {
-		list: opts.list ?? (() => service.list()),
+		get: opts.get ?? ((input) => service.get(input)),
 		spawn: opts.spawn ?? ((input) => service.spawn(input)),
-		exec: opts.exec ?? ((input) => service.exec(input)),
+		send: opts.send ?? ((input) => service.send(input)),
 		wait: opts.wait ?? ((input) => service.wait(input)),
 		download: opts.download ?? ((input) => service.download(input)),
 		upload: opts.upload ?? ((input) => service.upload(input)),
@@ -177,9 +185,29 @@ async function callTool(
 	const a = args as Record<string, unknown>;
 
 	switch (name) {
-		case "list":
-			if (Object.keys(a).length > 0) return err(id, -32602, "list takes no arguments");
-			return await runOp(id, ops.list, formatList);
+		case "get": {
+			let paneId: string | undefined;
+			try {
+				paneId = optString(a.id, "get.id");
+			} catch (e) {
+				return err(id, -32602, e instanceof Error ? e.message : String(e));
+			}
+			if (paneId) {
+				const idErr = checkPaneId(paneId, "get.id");
+				if (idErr) return err(id, -32602, idErr);
+			}
+			if (a.lines !== undefined && (!Number.isInteger(a.lines) || (a.lines as number) < 1 || (a.lines as number) > 10000)) {
+				return err(id, -32602, "get.lines must be between 1 and 10000");
+			}
+			if (Object.keys(a).some((k) => !["id", "lines"].includes(k))) {
+				return err(id, -32602, "get received an unknown argument");
+			}
+			return await runOp(
+				id,
+				() => ops.get({ id: paneId, lines: a.lines as number | undefined }),
+				formatGet,
+			);
+		}
 
 		case "spawn": {
 			if (typeof a.host !== "string") return err(id, -32602, "spawn.host must be a string");
@@ -203,29 +231,29 @@ async function callTool(
 			return await runOp(
 				id,
 				() => ops.spawn({ host: a.host as string, cwd, ttl: a.ttl as number | undefined }),
-				formatPane,
+				formatSpawn,
 			);
 		}
 
-		case "exec": {
-			const idErr = checkPaneId(a.id, "exec.id");
+		case "send": {
+			const idErr = checkPaneId(a.id, "send.id");
 			if (idErr) return err(id, -32602, idErr);
-			if (typeof a.cmd !== "string" || a.cmd.length === 0 || a.cmd.includes("\0")) {
-				return err(id, -32602, "exec.cmd must be a non-empty string");
+			if (typeof a.input !== "string" || a.input.length === 0 || a.input.includes("\0")) {
+				return err(id, -32602, "send.input must be a non-empty string");
 			}
 			if (a.async !== undefined && typeof a.async !== "boolean") {
-				return err(id, -32602, "exec.async must be a boolean");
+				return err(id, -32602, "send.async must be a boolean");
 			}
 			if (a.timeout_ms !== undefined && (!Number.isInteger(a.timeout_ms) || (a.timeout_ms as number) < 1 || (a.timeout_ms as number) > 300000)) {
-				return err(id, -32602, "exec.timeout_ms must be between 1 and 300000");
+				return err(id, -32602, "send.timeout_ms must be between 1 and 300000");
 			}
-			if (Object.keys(a).some((k) => !["id", "cmd", "async", "timeout_ms"].includes(k))) {
-				return err(id, -32602, "exec received an unknown argument");
+			if (Object.keys(a).some((k) => !["id", "input", "async", "timeout_ms"].includes(k))) {
+				return err(id, -32602, "send received an unknown argument");
 			}
 			return await runOp(
 				id,
-				() => ops.exec(a as { id: string; cmd: string; async?: boolean; timeout_ms?: number }),
-				formatExec,
+				() => ops.send(a as { id: string; input: string; async?: boolean; timeout_ms?: number }),
+				formatPaneResult,
 			);
 		}
 
@@ -244,7 +272,7 @@ async function callTool(
 			return await runOp(
 				id,
 				() => ops.wait(a as { id: string; timeout_ms?: number; lines?: number }),
-				formatExec,
+				formatPaneResult,
 			);
 		}
 
@@ -332,16 +360,21 @@ async function runOp<T>(id: JsonRpcId, op: () => Promise<T>, format: (v: T) => s
 	}
 }
 
-function formatList(v: { panes: PaneInfo[] }): string {
-	if (v.panes.length === 0) return "none";
-	return v.panes.map((p) => `${p.id} ${p.host} ${p.status} ${p.cwd}`).join("\n");
+function formatGet(v: GetResult): string {
+	if ("panes" in v) {
+		if (v.panes.length === 0) return "none";
+		return v.panes
+			.map((p) => `${p.id} ${p.host} ${p.status} ${p.cwd}${p.fg ? ` fg=${p.fg}` : ""}`)
+			.join("\n");
+	}
+	return formatPaneResult(v);
 }
 
-function formatPane(p: PaneInfo): string {
+function formatSpawn(p: PaneInfo): string {
 	return `${p.id} ${p.cwd}`;
 }
 
-function formatExec(v: ExecResult): string {
+function formatPaneResult(v: PaneResult): string {
 	if (v.status === "busy") {
 		const parts = ["status=busy"];
 		if (v.fg) parts.push(`fg=${v.fg}`);

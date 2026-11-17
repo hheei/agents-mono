@@ -4,7 +4,7 @@ import { createMcpServer } from "./mcp";
 describe("ssh MCP server", () => {
 	test("exposes concise tools under one namespace", async () => {
 		const server = createMcpServer({
-			list: async () => ({ panes: [] }),
+			get: async () => ({ panes: [] }),
 		});
 
 		const init = await server.handle({
@@ -21,20 +21,32 @@ describe("ssh MCP server", () => {
 
 		const listed = await server.handle({ jsonrpc: "2.0", id: 2, method: "tools/list" });
 		const tools = (listed?.result as { tools: Array<{ name: string }> }).tools;
-		expect(tools.map((t) => t.name)).toEqual(["list", "spawn", "exec", "wait", "download", "upload", "close"]);
+		expect(tools.map((t) => t.name)).toEqual(["get", "spawn", "send", "wait", "download", "upload", "close"]);
 	});
 
-	test("validates ids, treats empty optional strings as omitted, allows newline cmd, and formats busy/interrupted states", async () => {
+	test("validates ids, treats empty optional strings as omitted, supports get(all/id), and delegates send", async () => {
 		const calls: string[] = [];
 		const server = createMcpServer({
-			list: async () => {
-				calls.push("list");
+			get: async (input) => {
+				calls.push(`get:${input.id ?? "*"}`);
+				if (input.id) {
+					return {
+						id: input.id,
+						host: "mac",
+						status: "busy",
+						cwd: "/tmp",
+						fg: "sudo",
+						tty: "noecho",
+						output: "Password:",
+					};
+				}
 				return {
 					panes: [{
 						id: "a1b2c3",
 						host: "mac",
-						status: "idle",
+						status: "busy",
 						cwd: "/tmp",
+						fg: "sudo",
 					}],
 				};
 			},
@@ -42,9 +54,9 @@ describe("ssh MCP server", () => {
 				calls.push(`spawn:${input.host}:${input.cwd ?? "-"}`);
 				return { id: "a1b2c3", host: input.host, status: "idle", cwd: input.cwd ?? "/home/user" };
 			},
-			exec: async (input) => {
-				calls.push(`exec:${input.id}:${JSON.stringify(input.cmd)}:${input.async ?? false}`);
-				if (input.cmd === "ctrl-c") {
+			send: async (input) => {
+				calls.push(`send:${input.id}:${JSON.stringify(input.input)}:${input.async ?? false}`);
+				if (input.input === "ctrl-c") {
 					return { id: input.id, status: "idle", cwd: "/tmp", interrupted: true, output: "^C" };
 				}
 				return { id: input.id, status: "idle", cwd: "/tmp", exit_code: 0, output: "ok" };
@@ -75,7 +87,7 @@ describe("ssh MCP server", () => {
 			jsonrpc: "2.0",
 			id: 3,
 			method: "tools/call",
-			params: { name: "exec", arguments: { id: "A1B2C3", cmd: "ls" } },
+			params: { name: "send", arguments: { id: "A1B2C3", input: "ls" } },
 		});
 		expect(invalidId?.error?.code).toBe(-32602);
 
@@ -103,42 +115,51 @@ describe("ssh MCP server", () => {
 		});
 		expect((dlEmptyLocal?.result as { content: Array<{ text: string }> }).content[0].text).toBe("/tmp/Downloads/f.txt");
 
-		const listRes = await server.handle({
+		const getAll = await server.handle({
 			jsonrpc: "2.0",
 			id: 7,
 			method: "tools/call",
-			params: { name: "list" },
+			params: { name: "get", arguments: { id: "" } },
 		});
-		expect((listRes?.result as { content: Array<{ text: string }> }).content[0].text).toBe("a1b2c3 mac idle /tmp");
+		expect((getAll?.result as { content: Array<{ text: string }> }).content[0].text).toBe("a1b2c3 mac busy /tmp fg=sudo");
+
+		const getOne = await server.handle({
+			jsonrpc: "2.0",
+			id: 8,
+			method: "tools/call",
+			params: { name: "get", arguments: { id: "a1b2c3" } },
+		});
+		expect((getOne?.result as { content: Array<{ text: string }> }).content[0].text)
+			.toBe("status=busy fg=sudo tty=noecho cwd=/tmp\nPassword:");
 
 		const waitRes = await server.handle({
 			jsonrpc: "2.0",
-			id: 8,
+			id: 9,
 			method: "tools/call",
 			params: { name: "wait", arguments: { id: "a1b2c3" } },
 		});
 		expect((waitRes?.result as { content: Array<{ text: string }> }).content[0].text)
 			.toBe("status=busy fg=sudo tty=noecho stalled=true cwd=/tmp\nPassword:");
 
-		const nlExec = await server.handle({
-			jsonrpc: "2.0",
-			id: 9,
-			method: "tools/call",
-			params: { name: "exec", arguments: { id: "a1b2c3", cmd: "\n" } },
-		});
-		expect((nlExec?.result as { structuredContent: { exit_code: number } }).structuredContent.exit_code).toBe(0);
-
-		const intExec = await server.handle({
+		const nlSend = await server.handle({
 			jsonrpc: "2.0",
 			id: 10,
 			method: "tools/call",
-			params: { name: "exec", arguments: { id: "a1b2c3", cmd: "ctrl-c" } },
+			params: { name: "send", arguments: { id: "a1b2c3", input: "\n" } },
 		});
-		expect((intExec?.result as { content: Array<{ text: string }> }).content[0].text).toBe("interrupted cwd=/tmp\n^C");
+		expect((nlSend?.result as { structuredContent: { exit_code: number } }).structuredContent.exit_code).toBe(0);
+
+		const intSend = await server.handle({
+			jsonrpc: "2.0",
+			id: 11,
+			method: "tools/call",
+			params: { name: "send", arguments: { id: "a1b2c3", input: "ctrl-c" } },
+		});
+		expect((intSend?.result as { content: Array<{ text: string }> }).content[0].text).toBe("interrupted cwd=/tmp\n^C");
 
 		const closeRes = await server.handle({
 			jsonrpc: "2.0",
-			id: 11,
+			id: 12,
 			method: "tools/call",
 			params: { name: "close", arguments: { id: "a1b2c3" } },
 		});
@@ -146,10 +167,11 @@ describe("ssh MCP server", () => {
 		expect(calls).toEqual([
 			"spawn:mac:-",
 			"download:a1b2c3:f.txt:-",
-			"list",
+			"get:*",
+			"get:a1b2c3",
 			"wait:a1b2c3",
-			'exec:a1b2c3:"\\n":false',
-			'exec:a1b2c3:"ctrl-c":false',
+			'send:a1b2c3:"\\n":false',
+			'send:a1b2c3:"ctrl-c":false',
 			"close:a1b2c3",
 		]);
 	});
