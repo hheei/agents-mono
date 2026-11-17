@@ -33,13 +33,9 @@ describe("ssh MCP server", () => {
 					panes: [{
 						id: "a1b2c3",
 						host: "mac",
-						mode: "local-herdr-ssh",
-						herdr_pane_id: "w1:p1",
 						status: "idle",
 						cwd: "/tmp",
-						idle_ttl_sec: 1800,
-						last_used_at: "2026-11-17T00:00:00.000Z",
-					}],
+						}],
 				};
 			},
 			exec: async (input) => {
@@ -56,7 +52,7 @@ describe("ssh MCP server", () => {
 			jsonrpc: "2.0",
 			id: 3,
 			method: "tools/call",
-			params: { name: "exec", arguments: { id: "bad", command: "ls" } },
+			params: { name: "exec", arguments: { id: "A1B2C3", command: "ls" } },
 		});
 		expect(invalid?.error?.code).toBe(-32602);
 
@@ -82,7 +78,7 @@ describe("ssh MCP server", () => {
 			method: "tools/call",
 			params: { name: "close", arguments: { id: "a1b2c3" } },
 		});
-		expect((closeRes?.result as { content: Array<{ text: string }> }).content[0].text).toBe("a1b2c3: closed");
+		expect((closeRes?.result as { content: Array<{ text: string }> }).content[0].text).toBe("a1b2c3 closed");
 		expect(calls).toEqual(["list", "exec:a1b2c3:false", "close:a1b2c3"]);
 	});
 });

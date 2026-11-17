@@ -226,15 +226,15 @@ describe("PaneService", () => {
 		const cache = await tempCache();
 		const harness = createHerdrHarness();
 		let nowMs = 1_000_000;
+		const downloadsDir = join(cache, "Downloads");
 		const service = new PaneService({
 			runner: harness.runner,
-			environment: { AGENTS_SSH_CACHE_DIR: cache },
+			environment: { AGENTS_SSH_CACHE_DIR: cache, AGENTS_SSH_DOWNLOADS_DIR: downloadsDir },
 			now: () => nowMs,
 		});
 
 		const spawned = await service.spawn({ host: "mac", cwd: "/Users/supercgor/repo" });
 		expect(spawned.id).toMatch(/^[0-9a-f]{6}$/);
-		expect(spawned.mode).toBe("local-herdr-ssh");
 		expect(spawned.cwd).toBe("/Users/supercgor/repo");
 
 		harness.setRemotePwd("/Users/supercgor/repo/sub");
@@ -245,13 +245,14 @@ describe("PaneService", () => {
 		expect(execRes.output).toBe("hello world");
 
 		const dl = await service.download({ id: spawned.id, remote_path: "out.log" });
-		expect(dl.remotePath).toBe("/Users/supercgor/repo/sub/out.log");
+		expect(dl.remote_path).toBe("/Users/supercgor/repo/sub/out.log");
+		expect(dl.local_path).toBe(join(downloadsDir, "out.log"));
 		expect(harness.sftpCalls[0]?.stdin).toContain('"/Users/supercgor/repo/sub/out.log"');
 
 		const localFile = join(cache, "local.txt");
 		await writeFile(localFile, "data");
 		const ul = await service.upload({ id: spawned.id, local_path: localFile, remote_path: "dest/local.txt" });
-		expect(ul.remotePath).toBe("/Users/supercgor/repo/sub/dest/local.txt");
+		expect(ul.remote_path).toBe("/Users/supercgor/repo/sub/dest/local.txt");
 
 		const listed = await service.list();
 		expect(listed.panes).toHaveLength(1);
@@ -270,7 +271,6 @@ describe("PaneService", () => {
 		});
 
 		const spawned = await service.spawn({ host: "judy" });
-		expect(spawned.mode).toBe("remote-herdr");
 
 		harness.setDelayNextExec(true);
 		const running = await service.exec({ id: spawned.id, command: "sleep 10", async: true });
@@ -283,7 +283,7 @@ describe("PaneService", () => {
 		expect(stillRunning.status).toBe("running");
 		expect(stillRunning.output_tail).toContain("hello world");
 
-		harness.completeDelayedJob(spawned.herdr_pane_id, running.job_id!, "/tmp/done", 0);
+		harness.completeDelayedJob("w1:p1", running.job_id!, "/tmp/done", 0);
 		const completed = await service.wait({ id: spawned.id });
 		expect(completed.status).toBe("done");
 		expect(completed.exit_code).toBe(0);

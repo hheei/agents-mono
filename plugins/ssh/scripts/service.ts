@@ -17,17 +17,14 @@ export interface PaneServiceOptions {
 	runner?: ProcessRunner;
 	environment?: NodeJS.ProcessEnv;
 	now?: () => number;
+	downloadsDir?: string;
 }
 
 export interface PaneSummary {
 	id: string;
 	host: string;
-	mode: HerdrMode;
-	herdr_pane_id: string;
 	status: "idle" | "running";
 	cwd: string;
-	idle_ttl_sec: number;
-	last_used_at: string;
 	job_id?: string;
 }
 
@@ -64,7 +61,8 @@ export class PaneService {
 		const env = options.environment ?? process.env;
 		this.#paths = resolveCachePaths(env);
 		this.#runner = options.runner ?? runProcess;
-		this.#ssh = new SshTransport(this.#paths, readSshSettings(env), this.#runner);
+		const downloadsDir = options.downloadsDir ?? (env.AGENTS_SSH_DOWNLOADS_DIR?.trim() || undefined);
+		this.#ssh = new SshTransport(this.#paths, readSshSettings(env), this.#runner, downloadsDir);
 		this.#herdr = new HerdrClient(this.#runner, this.#ssh);
 		this.#defaultIdleTtlSec = readDefaultIdleTtl(env);
 		this.#now = options.now ?? (() => Date.now());
@@ -99,7 +97,7 @@ export class PaneService {
 		}
 
 		if (!(await this.#herdr.isRunning(target))) {
-			throw new Error(`herdr server is not running on ${target}; start herdr first`);
+			throw new Error(`herdr server is not running on ${target}`);
 		}
 
 		const id = await withStateLock(this.#paths, async () => {
@@ -192,7 +190,7 @@ export class PaneService {
 			const state = await this.reconcileAndGc();
 			const pane = findPaneOrThrow(state, id);
 			if (pane.status === "running" && pane.activeJob) {
-				throw new Error(`Pane ${id} is busy running job ${pane.activeJob.jobId}; call wait or close`);
+				throw new Error(`Pane ${id} is busy running job ${pane.activeJob.jobId}`);
 			}
 
 			const allocatedJobId = generateHexId(state.panes.flatMap((p) => (p.activeJob ? [p.id, p.activeJob.jobId] : [p.id])));
@@ -286,7 +284,7 @@ export class PaneService {
 			await writeState(this.#paths, state);
 			return { ...found };
 		});
-		return await this.#ssh.download(id, pane.host, pane.cwd, input.remote_path.trim(), input.local_path?.trim() || undefined);
+		return await this.#ssh.download(pane.host, pane.cwd, input.remote_path.trim(), input.local_path?.trim() || undefined);
 	}
 
 	async upload(input: { id: string; local_path: string; remote_path?: string }): Promise<TransferResult> {
@@ -299,7 +297,7 @@ export class PaneService {
 			await writeState(this.#paths, state);
 			return { ...found };
 		});
-		return await this.#ssh.upload(id, pane.host, pane.cwd, input.local_path.trim(), input.remote_path?.trim() || undefined);
+		return await this.#ssh.upload(pane.host, pane.cwd, input.local_path.trim(), input.remote_path?.trim() || undefined);
 	}
 
 	async close(input: { id: string }): Promise<CloseResult> {
@@ -374,7 +372,7 @@ export class PaneService {
 				const panes = await this.#herdr.listPanes(target);
 				liveByTarget.set(target, new Map(panes.map((p) => [p.pane_id, p])));
 			} catch {
-				// If target unreachable temporarily, keep records until verifiable.
+				// Keep records if target is temporarily unreachable.
 			}
 		}
 
@@ -436,12 +434,8 @@ function toSummary(pane: PaneRecord): PaneSummary {
 	return {
 		id: pane.id,
 		host: pane.host,
-		mode: pane.mode,
-		herdr_pane_id: pane.herdrPaneId,
 		status: pane.status,
 		cwd: pane.cwd,
-		idle_ttl_sec: pane.idleTtlSec,
-		last_used_at: new Date(pane.lastUsedAt).toISOString(),
 		...(pane.activeJob ? { job_id: pane.activeJob.jobId } : {}),
 	};
 }
@@ -450,7 +444,7 @@ export function parseJobOutput(
 	raw: string,
 	jobId: string,
 	startMarker: string,
-	donePrefix: string,
+	_donePrefix: string,
 ): { done: boolean; exitCode?: number; cwd?: string; output: string } {
 	const lines = raw.replaceAll("\r\n", "\n").split("\n");
 	let startIdx = -1;
@@ -476,7 +470,6 @@ export function parseJobOutput(
 		}
 	}
 
-	// Fallback: check if donePrefix exists inline.
 	const body = lines.slice(sliceStart).join("\n").replace(/\n+$/, "");
 	return { done: false, output: body };
 }

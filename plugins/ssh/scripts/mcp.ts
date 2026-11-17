@@ -36,12 +36,12 @@ const SERVER_INFO = { name: "ssh", version: "0.8.0" };
 const TOOLS = [
 	{
 		name: "list",
-		description: "List active SSH/Herdr panes with status and cwd.",
+		description: "List active panes (id, host, status, cwd).",
 		inputSchema: { type: "object", properties: {}, required: [], additionalProperties: false },
 	},
 	{
 		name: "spawn",
-		description: "Open a persistent SSH/Herdr shell pane and return its 6-char hex id.",
+		description: "Open a shell pane and return its 6-char lowercase hex id.",
 		inputSchema: {
 			type: "object",
 			properties: {
@@ -55,11 +55,11 @@ const TOOLS = [
 	},
 	{
 		name: "exec",
-		description: "Run a shell command in a pane (sync or async).",
+		description: "Run a command in a pane (sync or async).",
 		inputSchema: {
 			type: "object",
 			properties: {
-				id: { type: "string", pattern: "^[0-9a-fA-F]{6}$" },
+				id: { type: "string", pattern: "^[0-9a-f]{6}$" },
 				command: { type: "string", minLength: 1 },
 				async: { type: "boolean" },
 				timeout_ms: { type: "integer", minimum: 1, maximum: 300000 },
@@ -70,11 +70,11 @@ const TOOLS = [
 	},
 	{
 		name: "wait",
-		description: "Wait for or read output from a pane command.",
+		description: "Wait for a running command or read pane output.",
 		inputSchema: {
 			type: "object",
 			properties: {
-				id: { type: "string", pattern: "^[0-9a-fA-F]{6}$" },
+				id: { type: "string", pattern: "^[0-9a-f]{6}$" },
 				timeout_ms: { type: "integer", minimum: 1, maximum: 300000 },
 				lines: { type: "integer", minimum: 1, maximum: 10000 },
 			},
@@ -84,11 +84,11 @@ const TOOLS = [
 	},
 	{
 		name: "download",
-		description: "Download a remote file or directory via SFTP relative to pane cwd.",
+		description: "SFTP download from pane (remote relative to pane cwd; local defaults to ~/Downloads).",
 		inputSchema: {
 			type: "object",
 			properties: {
-				id: { type: "string", pattern: "^[0-9a-fA-F]{6}$" },
+				id: { type: "string", pattern: "^[0-9a-f]{6}$" },
 				remote_path: { type: "string", minLength: 1 },
 				local_path: { type: "string", minLength: 1 },
 			},
@@ -98,11 +98,11 @@ const TOOLS = [
 	},
 	{
 		name: "upload",
-		description: "Upload a local file or directory via SFTP relative to pane cwd.",
+		description: "SFTP upload to pane (remote defaults/resolves to pane cwd).",
 		inputSchema: {
 			type: "object",
 			properties: {
-				id: { type: "string", pattern: "^[0-9a-fA-F]{6}$" },
+				id: { type: "string", pattern: "^[0-9a-f]{6}$" },
 				local_path: { type: "string", minLength: 1 },
 				remote_path: { type: "string", minLength: 1 },
 			},
@@ -116,7 +116,7 @@ const TOOLS = [
 		inputSchema: {
 			type: "object",
 			properties: {
-				id: { type: "string", pattern: "^[0-9a-fA-F]{6}$" },
+				id: { type: "string", pattern: "^[0-9a-f]{6}$" },
 			},
 			required: ["id"],
 			additionalProperties: false,
@@ -265,7 +265,7 @@ async function callTool(
 			return await runOp(
 				id,
 				() => ops.download(args as { id: string; remote_path: string; local_path?: string }),
-				(v) => `${v.localPath} <- ${v.host}:${v.remotePath} (${v.kind})`,
+				(v) => v.local_path,
 			);
 		}
 
@@ -284,7 +284,7 @@ async function callTool(
 			return await runOp(
 				id,
 				() => ops.upload(args as { id: string; local_path: string; remote_path?: string }),
-				(v) => `${v.localPath} -> ${v.host}:${v.remotePath} (${v.kind})`,
+				(v) => v.remote_path,
 			);
 		}
 
@@ -297,7 +297,7 @@ async function callTool(
 			return await runOp(
 				id,
 				() => ops.close(args as { id: string }),
-				(v) => `${v.id}: ${v.closed ? "closed" : "not_found"}`,
+				(v) => `${v.id} ${v.closed ? "closed" : "not_found"}`,
 			);
 		}
 
@@ -307,7 +307,7 @@ async function callTool(
 }
 
 function validatePaneIdArg(value: unknown, label: string): string | undefined {
-	if (typeof value !== "string") return `${label} must be a 6-character hex string`;
+	if (typeof value !== "string") return `${label} must be a 6-character lowercase hex string`;
 	try {
 		validateHexId(value);
 		return undefined;
@@ -329,24 +329,25 @@ async function runOp<T>(id: JsonRpcId, op: () => Promise<T>, format: (v: T) => s
 }
 
 function formatList(v: { panes: PaneSummary[] }): string {
-	if (v.panes.length === 0) return "No active panes.";
+	if (v.panes.length === 0) return "none";
 	return v.panes
-		.map((p) => `${p.id}  ${p.host}  ${p.status}  ${p.cwd}${p.job_id ? `  job=${p.job_id}` : ""}`)
+		.map((p) => `${p.id} ${p.host} ${p.status} ${p.cwd}${p.job_id ? ` ${p.job_id}` : ""}`)
 		.join("\n");
 }
 
 function formatPane(p: PaneSummary): string {
-	return `${p.id}  ${p.host}  ${p.status}  ${p.cwd}`;
+	return `${p.id} ${p.cwd}`;
 }
 
 function formatExec(v: ExecResult): string {
 	if (v.status === "running") {
-		return [`id=${v.id} status=running job=${v.job_id} cwd=${v.cwd}`, v.output_tail ?? ""].filter(Boolean).join("\n");
+		const head = `status=running job=${v.job_id} cwd=${v.cwd}`;
+		return v.output_tail ? `${head}\n${v.output_tail}` : head;
 	}
-	const header = v.exit_code === undefined
-		? `id=${v.id} status=done cwd=${v.cwd}`
-		: `id=${v.id} status=done exit=${v.exit_code} cwd=${v.cwd}`;
-	return v.output ? `${header}\n${v.output}` : header;
+	const head = v.exit_code === undefined
+		? `cwd=${v.cwd}`
+		: `exit=${v.exit_code} cwd=${v.cwd}`;
+	return v.output ? `${head}\n${v.output}` : head;
 }
 
 function requestedProtocolVersion(params: unknown): string {

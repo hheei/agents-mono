@@ -28,7 +28,6 @@
       "SFTP"
     ],
     "websiteURL": "https://github.com/hheei/agents-mono",
-    "defaultPrompt": "Use ssh/spawn to open a persistent pane, ssh/exec and ssh/wait to run commands, ssh/download and ssh/upload for SFTP transfers, ssh/list to inspect active panes, and ssh/close when finished.",
     "brandColor": "#111827",
     "composerIcon": "./assets/icon.svg"
   },

@@ -26,9 +26,9 @@ export function validateHost(value: string): string {
 }
 
 export function validateHexId(value: string): string {
-	const id = value.trim().toLowerCase();
+	const id = value.trim();
 	if (!/^[0-9a-f]{6}$/.test(id)) {
-		throw new Error("id must be a 6-character hex pane id");
+		throw new Error("id must be a 6-character lowercase hex pane id");
 	}
 	return id;
 }

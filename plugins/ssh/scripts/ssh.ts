@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { copyFile, cp, mkdir, stat, writeFile } from "node:fs/promises";
-import { basename, dirname, join, posix, resolve } from "node:path";
+import { homedir } from "node:os";
+import { basename, dirname, isAbsolute, join, posix, resolve } from "node:path";
 import { isLocalHost, type ProcessResult, type ProcessRunner, quoteShell } from "./process";
 import type { CachePaths } from "./state";
 
@@ -13,10 +14,8 @@ export interface SshSettings {
 }
 
 export interface TransferResult {
-	id: string;
-	host: string;
-	localPath: string;
-	remotePath: string;
+	local_path: string;
+	remote_path: string;
 	kind: "file" | "directory";
 }
 
@@ -55,15 +54,29 @@ export function buildSshOptions(controlPath: string, settings: SshSettings): str
 	];
 }
 
+export function resolveLocalPath(rawPath: string | undefined, defaultBaseDir: string, defaultName?: string): string {
+	if (!rawPath || rawPath.trim() === "") {
+		return defaultName ? join(defaultBaseDir, defaultName) : defaultBaseDir;
+	}
+	const trimmed = rawPath.trim();
+	const home = homedir();
+	if (trimmed === "~") return home;
+	if (trimmed.startsWith("~/")) return join(home, trimmed.slice(2));
+	if (isAbsolute(trimmed)) return resolve(trimmed);
+	return resolve(defaultBaseDir, trimmed);
+}
+
 export class SshTransport {
 	readonly #paths: CachePaths;
 	readonly #settings: SshSettings;
 	readonly #runner: ProcessRunner;
+	readonly #downloadsDir: string;
 
-	constructor(paths: CachePaths, settings: SshSettings, runner: ProcessRunner) {
+	constructor(paths: CachePaths, settings: SshSettings, runner: ProcessRunner, downloadsDir?: string) {
 		this.#paths = paths;
 		this.#settings = settings;
 		this.#runner = runner;
+		this.#downloadsDir = downloadsDir ?? join(homedir(), "Downloads");
 	}
 
 	async controlPath(host: string): Promise<string> {
@@ -120,73 +133,82 @@ export class SshTransport {
 		return scriptPath;
 	}
 
-	async download(id: string, host: string, cwd: string, remotePath: string, localPath?: string): Promise<TransferResult> {
+	async download(host: string, cwd: string, remotePath: string, localPath?: string): Promise<TransferResult> {
 		const remoteAbs = posix.resolve(cwd, remotePath);
-		const defaultLocal = join(this.#paths.downloadsDir, id, posix.basename(remoteAbs) || "root");
-		const localAbs = resolve(localPath ?? defaultLocal);
-		await mkdir(dirname(localAbs), { recursive: true });
+		const baseName = posix.basename(remoteAbs) || "download";
+		let localAbs = resolveLocalPath(localPath, this.#downloadsDir, baseName);
 
 		if (isLocalHost(host)) {
 			const info = await stat(remoteAbs);
 			if (info.isDirectory()) {
+				await mkdir(dirname(localAbs), { recursive: true });
 				await cp(remoteAbs, localAbs, { recursive: true });
-				return { id, host, localPath: localAbs, remotePath: remoteAbs, kind: "directory" };
+				return { local_path: localAbs, remote_path: remoteAbs, kind: "directory" };
 			}
+			const existingLocal = await stat(localAbs).catch(() => undefined);
+			if (existingLocal?.isDirectory()) localAbs = join(localAbs, baseName);
+			await mkdir(dirname(localAbs), { recursive: true });
 			await copyFile(remoteAbs, localAbs);
-			return { id, host, localPath: localAbs, remotePath: remoteAbs, kind: "file" };
+			return { local_path: localAbs, remote_path: remoteAbs, kind: "file" };
 		}
 
 		const kind = await this.probeRemoteKind(host, remoteAbs);
 		if (kind === "missing") throw new Error(`Remote path not found on ${host}: ${remoteAbs}`);
 
-		const batch = kind === "directory"
-			? `get -R -- ${quoteSftp(remoteAbs)} ${quoteSftp(localAbs)}\n`
-			: `get -- ${quoteSftp(remoteAbs)} ${quoteSftp(localAbs)}\n`;
-		await this.runSftpBatch(host, batch);
-		return { id, host, localPath: localAbs, remotePath: remoteAbs, kind };
-	}
-
-	async upload(id: string, host: string, cwd: string, localPath: string, remotePath?: string): Promise<TransferResult> {
-		const localAbs = resolve(localPath);
-		const info = await stat(localAbs);
-		const kind: "file" | "directory" = info.isDirectory() ? "directory" : "file";
-		const remoteAbs = remotePath ? posix.resolve(cwd, remotePath) : posix.join(cwd, basename(localAbs));
-
-		if (isLocalHost(host)) {
-			await mkdir(posix.dirname(remoteAbs), { recursive: true });
-			if (kind === "directory") {
-				await cp(localAbs, remoteAbs, { recursive: true });
-			} else {
-				await copyFile(localAbs, remoteAbs);
-			}
-			return { id, host, localPath: localAbs, remotePath: remoteAbs, kind };
+		if (kind === "file") {
+			const existingLocal = await stat(localAbs).catch(() => undefined);
+			if (existingLocal?.isDirectory()) localAbs = join(localAbs, baseName);
+			await mkdir(dirname(localAbs), { recursive: true });
+			await this.runSftpBatch(host, `get -- ${quoteSftp(remoteAbs)} ${quoteSftp(localAbs)}\n`);
+			return { local_path: localAbs, remote_path: remoteAbs, kind };
 		}
 
+		await mkdir(dirname(localAbs), { recursive: true });
+		await this.runSftpBatch(host, `get -R -- ${quoteSftp(remoteAbs)} ${quoteSftp(localAbs)}\n`);
+		return { local_path: localAbs, remote_path: remoteAbs, kind };
+	}
+
+	async upload(host: string, cwd: string, localPath: string, remotePath?: string): Promise<TransferResult> {
+		const localAbs = resolveLocalPath(localPath, this.#downloadsDir);
+		const info = await stat(localAbs);
+		const kind: "file" | "directory" = info.isDirectory() ? "directory" : "file";
+		let remoteAbs = remotePath ? posix.resolve(cwd, remotePath) : posix.join(cwd, basename(localAbs));
+
+		if (isLocalHost(host)) {
+			if (kind === "file") {
+				const existingRemote = await stat(remoteAbs).catch(() => undefined);
+				if (existingRemote?.isDirectory()) remoteAbs = posix.join(remoteAbs, basename(localAbs));
+				await mkdir(posix.dirname(remoteAbs), { recursive: true });
+				await copyFile(localAbs, remoteAbs);
+			} else {
+				await mkdir(posix.dirname(remoteAbs), { recursive: true });
+				await cp(localAbs, remoteAbs, { recursive: true });
+			}
+			return { local_path: localAbs, remote_path: remoteAbs, kind };
+		}
+
+		const remoteKind = await this.probeRemoteKind(host, remoteAbs);
+		if (kind === "file") {
+			if (remoteKind === "directory") remoteAbs = posix.join(remoteAbs, basename(localAbs));
+			const prep = await this.exec(host, `mkdir -p -- ${quoteShell(posix.dirname(remoteAbs))}`, 15_000);
+			if (prep.timedOut || prep.exitCode !== 0) {
+				throw new Error(`Failed to prepare remote directory on ${host}: ${prep.stderr.trim() || `exit ${prep.exitCode}`}`);
+			}
+			await this.runSftpBatch(host, `put -- ${quoteSftp(localAbs)} ${quoteSftp(remoteAbs)}\n`);
+			return { local_path: localAbs, remote_path: remoteAbs, kind };
+		}
+
+		if (remoteKind === "file") throw new Error(`Remote target is an existing file on ${host}: ${remoteAbs}`);
 		const prep = await this.exec(host, `mkdir -p -- ${quoteShell(posix.dirname(remoteAbs))}`, 15_000);
 		if (prep.timedOut || prep.exitCode !== 0) {
 			throw new Error(`Failed to prepare remote directory on ${host}: ${prep.stderr.trim() || `exit ${prep.exitCode}`}`);
 		}
-
-		let batch: string;
-		if (kind === "directory") {
-			const remoteKind = await this.probeRemoteKind(host, remoteAbs);
-			if (remoteKind === "file") throw new Error(`Remote target is an existing file on ${host}: ${remoteAbs}`);
-			if (remoteKind === "directory") {
-				const remoteParent = posix.dirname(remoteAbs);
-				if (basename(localAbs) === posix.basename(remoteAbs)) {
-					batch = `put -R -- ${quoteSftp(localAbs)} ${quoteSftp(remoteParent)}\n`;
-				} else {
-					batch = `put -R -- ${quoteSftp(localAbs)} ${quoteSftp(remoteAbs)}\n`;
-				}
-			} else {
-				batch = `put -R -- ${quoteSftp(localAbs)} ${quoteSftp(remoteAbs)}\n`;
-			}
-		} else {
-			batch = `put -- ${quoteSftp(localAbs)} ${quoteSftp(remoteAbs)}\n`;
-		}
+		const batch = remoteKind === "directory" && basename(localAbs) === posix.basename(remoteAbs)
+			? `put -R -- ${quoteSftp(localAbs)} ${quoteSftp(posix.dirname(remoteAbs))}\n`
+			: `put -R -- ${quoteSftp(localAbs)} ${quoteSftp(remoteAbs)}\n`;
 
 		await this.runSftpBatch(host, batch);
-		return { id, host, localPath: localAbs, remotePath: remoteAbs, kind };
+		return { local_path: localAbs, remote_path: remoteAbs, kind };
 	}
 
 	private async probeRemoteKind(host: string, remoteAbs: string): Promise<"file" | "directory" | "missing"> {
