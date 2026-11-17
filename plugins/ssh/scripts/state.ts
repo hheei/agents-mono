@@ -11,6 +11,7 @@ export interface JobState {
 	mark: string;
 	exitCode?: number;
 	doneCwd?: string;
+	interrupted?: boolean;
 }
 
 export interface PaneRecord {
@@ -20,6 +21,8 @@ export interface PaneRecord {
 	wsId: string;
 	tabId: string;
 	paneId: string;
+	tty?: string;
+	shellPid?: number;
 	cwd: string;
 	status: "idle" | "busy";
 	ttl: number;

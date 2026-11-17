@@ -16,6 +16,7 @@ export interface HerdrPane {
 	cwd: string;
 	foreground_cwd?: string;
 	terminal_title?: string;
+	revision?: number;
 	focused?: boolean;
 }
 
@@ -29,6 +30,7 @@ export interface HerdrForegroundProcess {
 export interface HerdrProcessInfo {
 	pane_id: string;
 	shell_pid: number;
+	foreground_process_group_id?: number;
 	foreground_processes: HerdrForegroundProcess[];
 }
 
@@ -63,6 +65,15 @@ export class HerdrClient {
 		const args = wsId ? ["pane", "list", "--workspace", wsId] : ["pane", "list"];
 		const json = await this.execJson<{ panes: HerdrPane[] }>(target, args, 5_000);
 		return json.panes ?? [];
+	}
+
+	async getPane(target: HerdrTarget, paneId: string): Promise<HerdrPane | undefined> {
+		try {
+			const json = await this.execJson<{ pane: HerdrPane }>(target, ["pane", "get", paneId], 5_000);
+			return json.pane;
+		} catch {
+			return undefined;
+		}
 	}
 
 	async processInfo(target: HerdrTarget, paneId: string): Promise<HerdrProcessInfo | undefined> {
@@ -138,6 +149,20 @@ export class HerdrClient {
 		const res = await this.runHerdr(target, ["pane", "run", paneId, cmd], 10_000);
 		if (res.timedOut || res.exitCode !== 0) {
 			throw new Error(`herdr pane run failed: ${formatHerdrError(res)}`);
+		}
+	}
+
+	async sendText(target: HerdrTarget, paneId: string, text: string): Promise<void> {
+		const res = await this.runHerdr(target, ["pane", "send-text", paneId, text], 5_000);
+		if (res.timedOut || res.exitCode !== 0) {
+			throw new Error(`herdr pane send-text failed: ${formatHerdrError(res)}`);
+		}
+	}
+
+	async sendKeys(target: HerdrTarget, paneId: string, keys: string[]): Promise<void> {
+		const res = await this.runHerdr(target, ["pane", "send-keys", paneId, ...keys], 5_000);
+		if (res.timedOut || res.exitCode !== 0) {
+			throw new Error(`herdr pane send-keys failed: ${formatHerdrError(res)}`);
 		}
 	}
 

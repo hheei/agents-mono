@@ -19,6 +19,13 @@ export interface TransferResult {
 	kind: "file" | "directory";
 }
 
+export interface TtyProbe {
+	alive: boolean;
+	busy: boolean;
+	fg?: string;
+	tty?: "noecho" | "raw";
+}
+
 export function readSshCfg(env: NodeJS.ProcessEnv = process.env): SshCfg {
 	return {
 		connectTimeout: parsePositiveInt(env.AGENTS_SSH_CONNECT_TIMEOUT, 15, "AGENTS_SSH_CONNECT_TIMEOUT"),
@@ -64,6 +71,14 @@ export function resolveLocalPath(raw: string | undefined, baseDir: string, defau
 	if (trimmed.startsWith("~/")) return join(home, trimmed.slice(2));
 	if (isAbsolute(trimmed)) return resolve(trimmed);
 	return resolve(baseDir, trimmed);
+}
+
+export function parseSttyMode(sttyOut: string): "noecho" | "raw" | undefined {
+	if (!sttyOut) return undefined;
+	const tokens = new Set(sttyOut.split(/\s+/).filter(Boolean));
+	if (tokens.has("-echo")) return "noecho";
+	if (tokens.has("-icanon")) return "raw";
+	return undefined;
 }
 
 export class SshTransport {
@@ -119,6 +134,55 @@ export class SshTransport {
 			res = await this.#runner("ssh", args, timeoutMs, stdin);
 		}
 		return res;
+	}
+
+	async probeLocalStty(host: string, tty: string): Promise<"noecho" | "raw" | undefined> {
+		if (!tty.startsWith("/dev/") || /[\0\r\n\s]/.test(tty)) return undefined;
+		const cmd = `stty -a < ${quoteShell(tty)} 2>/dev/null || true`;
+		const res = isLocalHost(host)
+			? await this.#runner("sh", ["-c", cmd], 2_000).catch(() => undefined)
+			: await this.exec(host, cmd, 3_000).catch(() => undefined);
+		if (!res || res.timedOut || res.exitCode !== 0) return undefined;
+		return parseSttyMode(res.stdout);
+	}
+
+	async probeRemoteTty(host: string, tty: string, shellPid: number): Promise<TtyProbe | undefined> {
+		if (!tty.startsWith("/dev/") || /[\0\r\n\s]/.test(tty)) return undefined;
+		const ttyShort = tty.slice("/dev/".length);
+		const cmd = `ps -o pid=,tpgid=,comm= -t ${quoteShell(ttyShort)} 2>/dev/null; ps_ec=$?; printf '\\n---STTY---\\n'; stty -a < ${quoteShell(tty)} 2>/dev/null; printf '\\n---EC:%d---\\n' "$ps_ec"`;
+		const res = await this.exec(host, cmd, 5_000).catch(() => undefined);
+		if (!res || res.timedOut || res.exitCode !== 0) return undefined;
+
+		const sttyIdx = res.stdout.indexOf("---STTY---");
+		const ecMatch = res.stdout.match(/---EC:(\d+)---/);
+		if (sttyIdx < 0 || !ecMatch) return undefined;
+
+		const psRaw = res.stdout.slice(0, sttyIdx);
+		const sttyRaw = res.stdout.slice(sttyIdx + "---STTY---".length, ecMatch.index);
+		const rows: Array<{ pid: number; tpgid: number; comm: string }> = [];
+		for (const line of psRaw.split("\n")) {
+			const m = line.match(/^\s*(\d+)\s+(\d+)\s+(.+?)\s*$/);
+			if (m) rows.push({ pid: Number(m[1]), tpgid: Number(m[2]), comm: m[3].trim() });
+		}
+		if (rows.length === 0) {
+			return Number(ecMatch[1]) !== 0 ? { alive: false, busy: false } : undefined;
+		}
+
+		const shellRow = rows.find((r) => r.pid === shellPid);
+		const tpgid = shellRow?.tpgid ?? rows[0].tpgid;
+		if (!tpgid || tpgid === shellPid) {
+			return { alive: true, busy: false };
+		}
+
+		const fgRow = rows.find((r) => r.pid === tpgid)
+			?? rows.find((r) => r.pid !== shellPid && !/^(?:\/usr\/bin\/)?login$/.test(r.comm));
+		const fg = fgRow ? posix.basename(fgRow.comm.split(/\s+/)[0]) : undefined;
+		return {
+			alive: true,
+			busy: true,
+			fg,
+			tty: parseSttyMode(sttyRaw),
+		};
 	}
 
 	async writeJobScript(host: string, tok: string, cmd: string): Promise<string> {

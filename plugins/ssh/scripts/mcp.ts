@@ -55,7 +55,7 @@ const TOOLS = [
 	},
 	{
 		name: "exec",
-		description: "Run a command in a pane (sync or async).",
+		description: "Run cmd in idle pane, or send interactive text/keys (e.g. 'y\\n', 'ctrl-c') when busy.",
 		inputSchema: {
 			type: "object",
 			properties: {
@@ -210,7 +210,7 @@ async function callTool(
 		case "exec": {
 			const idErr = checkPaneId(a.id, "exec.id");
 			if (idErr) return err(id, -32602, idErr);
-			if (typeof a.cmd !== "string" || a.cmd.trim() === "" || a.cmd.includes("\0")) {
+			if (typeof a.cmd !== "string" || a.cmd.length === 0 || a.cmd.includes("\0")) {
 				return err(id, -32602, "exec.cmd must be a non-empty string");
 			}
 			if (a.async !== undefined && typeof a.async !== "boolean") {
@@ -343,10 +343,19 @@ function formatPane(p: PaneInfo): string {
 
 function formatExec(v: ExecResult): string {
 	if (v.status === "busy") {
-		const head = `status=busy cwd=${v.cwd}`;
+		const parts = ["status=busy"];
+		if (v.fg) parts.push(`fg=${v.fg}`);
+		if (v.tty) parts.push(`tty=${v.tty}`);
+		if (v.stalled) parts.push("stalled=true");
+		parts.push(`cwd=${v.cwd}`);
+		const head = parts.join(" ");
 		return v.output ? `${head}\n${v.output}` : head;
 	}
-	const head = v.exit_code === undefined ? `cwd=${v.cwd}` : `exit=${v.exit_code} cwd=${v.cwd}`;
+	const head = v.interrupted
+		? `interrupted cwd=${v.cwd}`
+		: v.exit_code === undefined
+			? `cwd=${v.cwd}`
+			: `exit=${v.exit_code} cwd=${v.cwd}`;
 	return v.output ? `${head}\n${v.output}` : head;
 }
 

@@ -16,6 +16,40 @@ export type ProcessRunner = (
 
 const OUTPUT_EDGE_BYTES = 8 * 1024;
 
+const KEY_ALIASES: Record<string, string> = {
+	esc: "esc",
+	escape: "esc",
+	enter: "enter",
+	return: "enter",
+	tab: "tab",
+	backspace: "backspace",
+	up: "up",
+	down: "down",
+	left: "left",
+	right: "right",
+	space: "space",
+};
+
+const CTRL_ONLY_KEYS = new Set(["esc"]);
+
+export function parseKeyToken(raw: string): string | undefined {
+	if (/[\0\r\n]/.test(raw)) return undefined;
+	const token = raw.trim().toLowerCase();
+	if (!token) return undefined;
+	if (token in KEY_ALIASES) return KEY_ALIASES[token];
+	const ctrlMatch = token.match(/^(?:ctrl[-+]|\^)([a-z\\])$/);
+	if (ctrlMatch) return `ctrl+${ctrlMatch[1]}`;
+	return undefined;
+}
+
+export function isControlKey(key: string): boolean {
+	return key.startsWith("ctrl+") || CTRL_ONLY_KEYS.has(key);
+}
+
+export function isInterruptKey(key: string): boolean {
+	return key === "ctrl+c" || key === "ctrl+\\" || key === "ctrl+d";
+}
+
 export function validateHost(raw: string): string {
 	const host = raw.trim();
 	if (host === "") throw new Error("host must be a non-empty string");

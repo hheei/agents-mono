@@ -2,8 +2,9 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { ProcessResult, ProcessRunner } from "./process";
+import { parseKeyToken, type ProcessResult, type ProcessRunner } from "./process";
 import { PaneService, parseJobOutput } from "./service";
+import { parseSttyMode } from "./ssh";
 
 const tempRoots: string[] = [];
 
@@ -20,21 +21,34 @@ afterEach(async () => {
 	}
 });
 
-function createHerdrHarness(options: { remoteHerdrHosts?: string[]; waitMiss?: boolean } = {}) {
+function createHerdrHarness(options: { remoteHerdrHosts?: string[] } = {}) {
 	let wsSeq = 1;
 	let tabSeq = 1;
 	let paneSeq = 1;
 	const workspaces = new Map<string, { workspace_id: string; label: string; pane_count: number; tab_count: number }>();
 	const tabs = new Map<string, { tab_id: string; workspace_id: string; label?: string }>();
-	const panes = new Map<string, { pane_id: string; workspace_id: string; tab_id: string; cwd: string; title?: string; output: string; foreground: number }>();
+	const panes = new Map<string, {
+		pane_id: string;
+		workspace_id: string;
+		tab_id: string;
+		cwd: string;
+		title?: string;
+		output: string;
+		revision: number;
+		shellPid: number;
+		fg?: { name: string; pid: number };
+		stty?: string;
+	}>();
 	const herdrCalls: string[] = [];
+	const sentKeys: Array<{ paneId: string; keys: string[] }> = [];
+	const sentTexts: Array<{ paneId: string; text: string }> = [];
 	const sftpCalls: Array<{ args: string[]; stdin?: string }> = [];
 	const sshCalls: Array<{ args: string[]; stdin?: string }> = [];
 	const remoteHerdr = new Set(options.remoteHerdrHosts ?? []);
 	let nextExecDelay = false;
 	let remotePwd = "/home/user";
 	let nextExitCode = 0;
-	let waitMiss = options.waitMiss ?? false;
+	let waitMiss = false;
 
 	const runner: ProcessRunner = async (command, args, _timeoutMs, stdin) => {
 		if (command === "ssh") {
@@ -48,6 +62,21 @@ function createHerdrHarness(options: { remoteHerdrHosts?: string[]; waitMiss?: b
 				}
 				return handleHerdr(remoteCmd);
 			}
+			if (remoteCmd.startsWith("ps -o pid=,tpgid=,comm=")) {
+				const pane = [...panes.values()][0];
+				const fg = pane?.fg;
+				const shellPid = pane?.shellPid ?? 400;
+				const tpgid = fg ? fg.pid : shellPid;
+				const psLines = fg
+					? `${shellPid} ${tpgid} /bin/zsh\n${fg.pid} ${tpgid} ${fg.name}`
+					: `${shellPid} ${tpgid} /bin/zsh`;
+				const stty = pane?.stty ?? "lflags: icanon isig echo";
+				return { exitCode: 0, stdout: `${psLines}\n---STTY---\n${stty}\n---EC:0---\n`, stderr: "" };
+			}
+			if (remoteCmd.startsWith("stty -a")) {
+				const pane = [...panes.values()][0];
+				return { exitCode: 0, stdout: pane?.stty ?? "lflags: icanon isig echo", stderr: "" };
+			}
 			if (remoteCmd.startsWith("cat > /tmp/apane_") || remoteCmd.startsWith("mkdir -p --")) {
 				return { exitCode: 0, stdout: "", stderr: "" };
 			}
@@ -55,6 +84,11 @@ function createHerdrHarness(options: { remoteHerdrHosts?: string[]; waitMiss?: b
 				return { exitCode: 0, stdout: "file", stderr: "" };
 			}
 			return { exitCode: 0, stdout: "", stderr: "" };
+		}
+
+		if (command === "sh" && args[0] === "-c" && args[1]?.startsWith("stty -a")) {
+			const pane = [...panes.values()][0];
+			return { exitCode: 0, stdout: pane?.stty ?? "speed 38400 baud; icanon echo", stderr: "" };
 		}
 
 		if (command === "sftp") {
@@ -91,7 +125,15 @@ function createHerdrHarness(options: { remoteHerdrHosts?: string[]; waitMiss?: b
 			const paneId = `${wsId}:p${paneSeq++}`;
 			workspaces.set(wsId, { workspace_id: wsId, label, pane_count: 1, tab_count: 1 });
 			tabs.set(tabId, { tab_id: tabId, workspace_id: wsId, label: "1" });
-			panes.set(paneId, { pane_id: paneId, workspace_id: wsId, tab_id: tabId, cwd: "/tmp", output: "", foreground: 0 });
+			panes.set(paneId, {
+				pane_id: paneId,
+				workspace_id: wsId,
+				tab_id: tabId,
+				cwd: "/tmp",
+				output: "",
+				revision: 1,
+				shellPid: 100 + paneSeq,
+			});
 			return okJson({ workspace: { workspace_id: wsId }, tab: { tab_id: tabId }, root_pane: { pane_id: paneId } });
 		}
 		if (group === "tab" && action === "create") {
@@ -106,7 +148,15 @@ function createHerdrHarness(options: { remoteHerdrHosts?: string[]; waitMiss?: b
 			ws.tab_count += 1;
 			ws.pane_count += 1;
 			tabs.set(tabId, { tab_id: tabId, workspace_id: wsId, label });
-			panes.set(paneId, { pane_id: paneId, workspace_id: wsId, tab_id: tabId, cwd: "/tmp", output: "", foreground: 0 });
+			panes.set(paneId, {
+				pane_id: paneId,
+				workspace_id: wsId,
+				tab_id: tabId,
+				cwd: "/tmp",
+				output: "",
+				revision: 1,
+				shellPid: 100 + paneSeq,
+			});
 			return okJson({ tab: { tab_id: tabId, workspace_id: wsId }, root_pane: { pane_id: paneId } });
 		}
 		if (group === "tab" && action === "rename") {
@@ -120,8 +170,22 @@ function createHerdrHarness(options: { remoteHerdrHosts?: string[]; waitMiss?: b
 			const wsFilter = wsIdx >= 0 ? rest[wsIdx + 1] : undefined;
 			const list = [...panes.values()]
 				.filter((p) => !wsFilter || p.workspace_id === wsFilter)
-				.map((p) => ({ pane_id: p.pane_id, workspace_id: p.workspace_id, tab_id: p.tab_id, cwd: p.cwd, terminal_title: p.title }));
+				.map((p) => ({ pane_id: p.pane_id, workspace_id: p.workspace_id, tab_id: p.tab_id, cwd: p.cwd, terminal_title: p.title, revision: p.revision }));
 			return okJson({ panes: list });
+		}
+		if (group === "pane" && action === "get") {
+			const pane = panes.get(rest[0]);
+			if (!pane) return errJson("pane_not_found", "pane not found");
+			return okJson({
+				pane: {
+					pane_id: pane.pane_id,
+					workspace_id: pane.workspace_id,
+					tab_id: pane.tab_id,
+					cwd: pane.cwd,
+					foreground_cwd: pane.cwd,
+					revision: pane.revision,
+				},
+			});
 		}
 		if (group === "pane" && action === "split") {
 			throw new Error("pane split must not be used");
@@ -132,28 +196,63 @@ function createHerdrHarness(options: { remoteHerdrHosts?: string[]; waitMiss?: b
 			pane.title = rest.slice(1).join(" ");
 			return { exitCode: 0, stdout: "{}", stderr: "" };
 		}
+		if (group === "pane" && action === "send-keys") {
+			const pane = panes.get(rest[0]);
+			if (!pane) return errJson("pane_not_found", "pane not found");
+			const keys = rest.slice(1);
+			sentKeys.push({ paneId: pane.pane_id, keys });
+			if (keys.includes("ctrl+c") && pane.fg) {
+				pane.fg = undefined;
+				pane.output += "^C\n";
+				pane.revision += 1;
+			}
+			return { exitCode: 0, stdout: "{}", stderr: "" };
+		}
+		if (group === "pane" && action === "send-text") {
+			const pane = panes.get(rest[0]);
+			if (!pane) return errJson("pane_not_found", "pane not found");
+			const text = rest[1] ?? "";
+			sentTexts.push({ paneId: pane.pane_id, text });
+			pane.output += text;
+			pane.revision += 1;
+			if (pane.fg && text.includes("y\n")) {
+				const startMatches = [...pane.output.matchAll(/__APANE_START_([0-9a-f]{6})__/g)];
+				const tok = startMatches.at(-1)?.[1];
+				pane.fg = undefined;
+				if (tok) {
+					pane.output += `confirmed\n__APANE_DONE_${tok}:0:${remotePwd}__\n`;
+				}
+			}
+			return { exitCode: 0, stdout: "{}", stderr: "" };
+		}
 		if (group === "pane" && action === "run") {
 			const pane = panes.get(rest[0]);
 			if (!pane) return errJson("pane_not_found", "pane not found");
 			const cmd = (rest[1] ?? "").replaceAll("'\\''", "'").replaceAll("'\\''", "'");
-			const readyMatch = cmd.match(/READY_%s:(?:%d|0):%s[^']*' '([0-9a-f]{6})'/);
+			const readyMatch = cmd.match(/READY_%s:(?:%d|0):%s:%s:%s[^']*' '([0-9a-f]{6})'/);
 			if (readyMatch) {
 				const hexId = readyMatch[1];
 				const cdMatch = cmd.match(/cd -- '([^']+)'/);
 				const cwd = cdMatch ? cdMatch[1] : remotePwd;
 				if (cwd === "/missing") {
-					pane.output += `\n__APANE_READY_${hexId}:1:/tmp__\n`;
+					pane.output += `\n__APANE_READY_${hexId}:1:${pane.shellPid}:/dev/pts/9:/tmp__\n`;
 				} else {
 					remotePwd = cwd;
-					pane.output += `\n__APANE_READY_${hexId}:0:${cwd}__\n`;
+					pane.cwd = cwd;
+					pane.output += `\n__APANE_READY_${hexId}:0:${pane.shellPid}:/dev/pts/9:${cwd}__\n`;
 				}
+				pane.revision += 1;
 				return { exitCode: 0, stdout: "{}", stderr: "" };
 			}
 			const startMatch = cmd.match(/START_%s[^']*' '([0-9a-f]{6})'/);
 			if (startMatch) {
 				const tok = startMatch[1];
 				pane.output += `\n__APANE_START_${tok}__\nhello world\n`;
-				if (!nextExecDelay) {
+				pane.revision += 1;
+				if (nextExecDelay) {
+					pane.fg = { name: "sudo", pid: 999 };
+				} else {
+					pane.cwd = remotePwd;
 					pane.output += `__APANE_DONE_${tok}:${nextExitCode}:${remotePwd}__\n`;
 				}
 			}
@@ -176,11 +275,17 @@ function createHerdrHarness(options: { remoteHerdrHosts?: string[]; waitMiss?: b
 			const paneIdx = rest.indexOf("--pane");
 			const pane = panes.get(rest[paneIdx + 1]);
 			if (!pane) return errJson("pane_not_found", "pane not found");
+			const procs = [
+				...(pane.fg
+					? [{ pid: pane.fg.pid, name: pane.fg.name, cmdline: pane.fg.name, cwd: pane.cwd }]
+					: [{ pid: pane.shellPid, name: "zsh", cmdline: "/usr/bin/zsh", cwd: pane.cwd }]),
+			];
 			return okJson({
 				process_info: {
 					pane_id: pane.pane_id,
-					shell_pid: 100,
-					foreground_processes: pane.foreground > 0 ? [{ pid: 200, name: "sleep", cmdline: "sleep 60", cwd: pane.cwd }] : [],
+					shell_pid: pane.shellPid,
+					foreground_process_group_id: pane.fg ? pane.fg.pid : pane.shellPid,
+					foreground_processes: procs,
 				},
 			});
 		}
@@ -197,6 +302,8 @@ function createHerdrHarness(options: { remoteHerdrHosts?: string[]; waitMiss?: b
 		tabs,
 		panes,
 		herdrCalls,
+		sentKeys,
+		sentTexts,
 		sftpCalls,
 		sshCalls,
 		setDelayNextExec(delay: boolean) {
@@ -208,6 +315,9 @@ function createHerdrHarness(options: { remoteHerdrHosts?: string[]; waitMiss?: b
 			const tok = startMatches.at(-1)?.[1];
 			if (!tok) throw new Error("No delayed job token found in pane output");
 			remotePwd = cwd;
+			pane.cwd = cwd;
+			pane.fg = undefined;
+			pane.revision += 1;
 			pane.output += `finished line\n__APANE_DONE_${tok}:${exitCode}:${cwd}__\n`;
 		},
 		setRemotePwd(pwd: string) {
@@ -227,8 +337,23 @@ function errJson(code: string, message: string): ProcessResult {
 	return { exitCode: 1, stdout: "", stderr: JSON.stringify({ error: { code, message } }) };
 }
 
-describe("parseJobOutput", () => {
-	test("extracts body, exit code, and cwd between markers", () => {
+describe("helpers", () => {
+	test("parseKeyToken normalizes ctrl/esc/enter tokens and preserves newline text", () => {
+		expect(parseKeyToken("ctrl-c")).toBe("ctrl+c");
+		expect(parseKeyToken("CTRL+D")).toBe("ctrl+d");
+		expect(parseKeyToken("^c")).toBe("ctrl+c");
+		expect(parseKeyToken("escape")).toBe("esc");
+		expect(parseKeyToken("enter\n")).toBeUndefined();
+		expect(parseKeyToken("y\n")).toBeUndefined();
+	});
+
+	test("parseSttyMode distinguishes noecho and raw", () => {
+		expect(parseSttyMode("lflags: icanon isig -echo echoe")).toBe("noecho");
+		expect(parseSttyMode("lflags: -icanon isig echo")).toBe("raw");
+		expect(parseSttyMode("lflags: icanon isig echo")).toBeUndefined();
+	});
+
+	test("parseJobOutput extracts body, exit code, and cwd between markers", () => {
 		const raw = [
 			"prompt$ . /tmp/apane_abc123.sh",
 			"__APANE_START_abc123__",
@@ -297,7 +422,47 @@ describe("PaneService", () => {
 		expect((await service.list()).panes).toHaveLength(0);
 	});
 
-	test("wait transitions busy -> idle cleanly even if async job already finished during reconcile", async () => {
+	test("exec sends interactive text (y\\n) and keys (ctrl-c) while busy, and guards idle ctrl-c race", async () => {
+		const cache = await tempCache();
+		const harness = createHerdrHarness();
+		const service = new PaneService({
+			runner: harness.runner,
+			env: { AGENTS_SSH_CACHE_DIR: cache },
+		});
+
+		const p = await service.spawn({ host: "local", cwd: "/tmp" });
+
+		// 1. Interactive prompt resolved via exec("y\n")
+		harness.setDelayNextExec(true);
+		const busy1 = await service.exec({ id: p.id, cmd: "confirm", async: true });
+		expect(busy1.status).toBe("busy");
+
+		const answered = await service.exec({ id: p.id, cmd: "y\n" });
+		expect(harness.sentTexts[0]).toEqual({ paneId: "w1:p1", text: "y\n" });
+		expect(answered).toEqual({
+			id: p.id,
+			status: "idle",
+			cwd: "/tmp",
+			exit_code: 0,
+			output: "hello world\ny\nconfirmed",
+		});
+
+		// 2. Stuck command interrupted via exec("ctrl-c") -> idle with interrupted: true
+		const busy2 = await service.exec({ id: p.id, cmd: "sleep 30", async: true });
+		expect(busy2.status).toBe("busy");
+
+		const interrupted = await service.exec({ id: p.id, cmd: "ctrl-c" });
+		expect(harness.sentKeys[0]).toEqual({ paneId: "w1:p1", keys: ["ctrl+c"] });
+		expect(interrupted.status).toBe("idle");
+		expect(interrupted.interrupted).toBe(true);
+		expect(interrupted.output).toContain("^C");
+
+		// 3. Race: ctrl-c arriving after pane already idle does not run command not found
+		const raced = await service.exec({ id: p.id, cmd: "ctrl-c" });
+		expect(raced).toEqual({ id: p.id, status: "idle", cwd: "/tmp", interrupted: true });
+	});
+
+	test("wait reports fg, tty, and stalled on timeout and settles busy -> idle across reconcile", async () => {
 		const cache = await tempCache();
 		const harness = createHerdrHarness({ remoteHerdrHosts: ["judy"] });
 		const service = new PaneService({
@@ -308,17 +473,25 @@ describe("PaneService", () => {
 		const spawned = await service.spawn({ host: "judy" });
 
 		harness.setDelayNextExec(true);
-		const busy = await service.exec({ id: spawned.id, cmd: "sleep 10", async: true });
+		const busy = await service.exec({ id: spawned.id, cmd: "sudo id", async: true });
 		expect(busy).toEqual({ id: spawned.id, status: "busy", cwd: "/home/user" });
 
-		await expect(service.exec({ id: spawned.id, cmd: "echo collide" })).rejects.toThrow("busy");
+		const pane = harness.panes.get("w1:p1")!;
+		pane.fg = { name: "sudo", pid: 999 };
+		pane.stty = "lflags: icanon isig -echo";
 
 		const stillBusy = await service.wait({ id: spawned.id, timeout_ms: 50 });
-		expect(stillBusy.status).toBe("busy");
-		expect(stillBusy.output).toContain("hello world");
+		expect(stillBusy).toEqual({
+			id: spawned.id,
+			status: "busy",
+			cwd: "/home/user",
+			fg: "sudo",
+			tty: "noecho",
+			stalled: true,
+			output: "hello world",
+		});
 
 		harness.completeLastDelayedJob("w1:p1", "/tmp/done", 0);
-		// Calling list() reconciles busy -> idle first, then wait() still returns exit_code & output.
 		const listed = await service.list();
 		expect(listed.panes).toEqual([{ id: spawned.id, host: "judy", status: "idle", cwd: "/tmp/done" }]);
 
@@ -349,7 +522,7 @@ describe("PaneService", () => {
 		});
 	});
 
-	test("lazy GC closes expired idle panes on next call while respecting ttl=0", async () => {
+	test("lazy GC reclaims idle local panes even when shell_pid appears in foreground_processes", async () => {
 		const cache = await tempCache();
 		const harness = createHerdrHarness();
 		let nowMs = 1_000_000;
@@ -359,8 +532,8 @@ describe("PaneService", () => {
 			now: () => nowMs,
 		});
 
-		await service.spawn({ host: "mac" });
-		const pinned = await service.spawn({ host: "mac", ttl: 0 });
+		await service.spawn({ host: "local" });
+		const pinned = await service.spawn({ host: "local", ttl: 0 });
 		expect(harness.panes.size).toBe(2);
 
 		nowMs += 61_000;
