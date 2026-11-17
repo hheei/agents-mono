@@ -305,7 +305,7 @@ export class PaneService {
 			const tok = generateHexId(usedToks);
 			const scriptPath = await this.#ssh.writeJobScript(pane.host, tok, input.input);
 			const mark = `__APANE_START_${tok}__`;
-			const launch = `printf '__APANE_''START_%s__\\n' '${tok}'; . ${quoteShell(scriptPath)}; __apane_ec=$?; rm -f ${quoteShell(scriptPath)}; printf '\\n__APANE_''DONE_%s:%d:%s__\\n' '${tok}' "$__apane_ec" "$PWD"`;
+			const launch = `printf '\\n__APANE_''START_%s__\\n' '${tok}'; . ${quoteShell(scriptPath)}; __apane_ec=$?; rm -f ${quoteShell(scriptPath)}; printf '\\n__APANE_''DONE_%s:%d:%s__\\n' '${tok}' "$__apane_ec" "$PWD"`;
 
 			await this.#herdr.runInPane(target, pane.paneId, launch);
 			pane.status = "busy";
@@ -442,12 +442,14 @@ export class PaneService {
 	): Promise<PaneResult> {
 		const target = targetFor(record);
 		const doneRe = `^__APANE_DONE_${tok}:[0-9]+:.*__$`;
-		const startRev = (await this.#herdr.getPane(target, record.paneId).catch(() => undefined))?.revision;
+		const startTail = await this.readPaneTail(target, record.paneId);
 		const deadline = Date.now() + timeoutMs;
 
 		let raw = "";
 		let parsed = { done: false, output: "" } as ReturnType<typeof parseJobOutput>;
 		let firstStep = true;
+		let prevTail = startTail;
+		let sawProgress = false;
 		let lastProbe: ProbeResult | undefined;
 
 		while (true) {
@@ -466,9 +468,20 @@ export class PaneService {
 
 			raw = await this.readPaneSafe(target, record, lines);
 			parsed = parseJobOutput(raw, tok, mark);
+			if ((matched && !parsed.done) || (parsed.done && !raw.includes(mark) && raw.split("\n").length < lines)) {
+				await delay(50);
+				raw = await this.readPaneSafe(target, record, lines);
+				parsed = parseJobOutput(raw, tok, mark);
+			}
 			if (matched || parsed.done) {
 				return await this.finishDone(record, tok, parsed);
 			}
+
+			const curTail = tailLines(raw.trimEnd(), 80);
+			if (prevTail !== undefined && curTail !== prevTail) {
+				sawProgress = true;
+			}
+			prevTail = curTail;
 
 			lastProbe = await this.probeForeground(record);
 			if (lastProbe && !lastProbe.alive) {
@@ -497,8 +510,7 @@ export class PaneService {
 			return await this.finishInterrupted(record, tok, lastProbe.cwd ?? record.cwd, parsed.output);
 		}
 
-		const endPane = await this.#herdr.getPane(target, record.paneId).catch(() => undefined);
-		const stalled = startRev !== undefined && endPane?.revision !== undefined && endPane.revision === startRev;
+		const stalled = startTail !== undefined && !sawProgress;
 
 		return {
 			id: record.id,
@@ -611,6 +623,15 @@ export class PaneService {
 			tty: ttyMode,
 			cwd,
 		};
+	}
+
+	private async readPaneTail(target: HerdrTarget, paneId: string): Promise<string | undefined> {
+		try {
+			const text = await this.#herdr.readPane(target, paneId, 80);
+			return tailLines(text.trimEnd(), 80);
+		} catch {
+			return undefined;
+		}
 	}
 
 	private async readPaneSafe(target: HerdrTarget, record: PaneRecord, lines: number): Promise<string> {
@@ -749,10 +770,22 @@ export function parseJobOutput(
 ): { done: boolean; exitCode?: number; cwd?: string; output: string } {
 	const lines = raw.replaceAll("\r\n", "\n").split("\n");
 	let startIdx = -1;
+	let inlineRest: string | undefined;
 	for (let i = lines.length - 1; i >= 0; i -= 1) {
 		if (lines[i].trim() === mark) {
 			startIdx = i;
 			break;
+		}
+	}
+	if (startIdx < 0) {
+		for (let i = lines.length - 1; i >= 0; i -= 1) {
+			const pos = lines[i].indexOf(mark);
+			if (pos >= 0) {
+				startIdx = i;
+				const rest = lines[i].slice(pos + mark.length).trimStart();
+				if (rest) inlineRest = rest;
+				break;
+			}
 		}
 	}
 
@@ -760,9 +793,15 @@ export function parseJobOutput(
 	const doneRe = new RegExp(`^__APANE_DONE_${tok}:(\\d+):(.*)__$`);
 	const anyStartRe = /^__APANE_START_[0-9a-f]{6}__$/;
 	const anyDoneRe = /^__APANE_DONE_[0-9a-f]{6}:\d+:.*__$/;
+	const anyReadyRe = /^__APANE_READY_[0-9a-f]{6}:\d+:.*__$/;
 	if (startIdx < 0) {
 		for (let i = lines.length - 1; i >= 0; i -= 1) {
-			if (anyDoneRe.test(lines[i]) && !doneRe.test(lines[i])) {
+			const trimmed = lines[i].trim();
+			if (
+				(anyDoneRe.test(trimmed) && !doneRe.test(trimmed)) ||
+				anyStartRe.test(trimmed) ||
+				anyReadyRe.test(trimmed)
+			) {
 				sliceStart = i + 1;
 				break;
 			}
@@ -770,24 +809,32 @@ export function parseJobOutput(
 	}
 
 	let sliceEnd = lines.length;
+	let doneMatch: RegExpMatchArray | null = null;
 	for (let i = sliceStart; i < lines.length; i += 1) {
-		const m = lines[i].match(doneRe);
+		const trimmed = lines[i].trim();
+		const m = trimmed.match(doneRe);
 		if (m) {
-			const body = lines.slice(sliceStart, i).join("\n").replace(/\n+$/, "");
-			return {
-				done: true,
-				exitCode: Number(m[1]),
-				cwd: m[2],
-				output: body,
-			};
+			sliceEnd = i;
+			doneMatch = m;
+			break;
 		}
-		if (startIdx >= 0 && (anyStartRe.test(lines[i].trim()) || anyDoneRe.test(lines[i]))) {
+		if (startIdx >= 0 && (anyStartRe.test(trimmed) || anyDoneRe.test(trimmed))) {
 			sliceEnd = i;
 			break;
 		}
 	}
 
-	const body = lines.slice(sliceStart, sliceEnd).join("\n").replace(/\n+$/, "");
+	const sliced = lines.slice(sliceStart, sliceEnd);
+	if (inlineRest !== undefined) sliced.unshift(inlineRest);
+	const body = sliced.join("\n").replace(/\n+$/, "");
+	if (doneMatch) {
+		return {
+			done: true,
+			exitCode: Number(doneMatch[1]),
+			cwd: doneMatch[2],
+			output: body,
+		};
+	}
 	return { done: false, output: body };
 }
 

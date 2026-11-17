@@ -49,6 +49,7 @@ function createHerdrHarness(options: { remoteHerdrHosts?: string[] } = {}) {
 	let remotePwd = "/home/user";
 	let nextExitCode = 0;
 	let waitMiss = false;
+	let onWaitAppend: string | undefined;
 
 	const runner: ProcessRunner = async (command, args, _timeoutMs, stdin) => {
 		if (command === "ssh") {
@@ -261,6 +262,10 @@ function createHerdrHarness(options: { remoteHerdrHosts?: string[] } = {}) {
 		if (group === "pane" && action === "wait-output") {
 			const pane = panes.get(rest[0]);
 			if (!pane) return errJson("pane_not_found", "pane not found");
+			if (onWaitAppend) {
+				pane.output += onWaitAppend;
+				onWaitAppend = undefined;
+			}
 			const regexIdx = rest.indexOf("--regex");
 			const re = new RegExp(rest[regexIdx + 1], "m");
 			if (!waitMiss && re.test(pane.output)) return { exitCode: 0, stdout: "{}", stderr: "" };
@@ -326,6 +331,9 @@ function createHerdrHarness(options: { remoteHerdrHosts?: string[] } = {}) {
 		setWaitMiss(miss: boolean) {
 			waitMiss = miss;
 		},
+		setOnWaitAppend(text: string | undefined) {
+			onWaitAppend = text;
+		},
 	};
 }
 
@@ -367,6 +375,33 @@ describe("helpers", () => {
 			exitCode: 2,
 			cwd: "/srv/app",
 			output: "line 1\nline 2",
+		});
+	});
+
+	test("parseJobOutput handles inline start marker and READY boundary fallback", () => {
+		const inline = [
+			"prompt$ __APANE_START_abc123__first",
+			"second",
+			"__APANE_DONE_abc123:0:/srv/app__",
+		].join("\n");
+		expect(parseJobOutput(inline, "abc123", "__APANE_START_abc123__")).toEqual({
+			done: true,
+			exitCode: 0,
+			cwd: "/srv/app",
+			output: "first\nsecond",
+		});
+
+		const withoutStart = [
+			"exec 'ssh' ...",
+			"__APANE_READY_112233:0:42:/dev/pts/1:/srv/app__",
+			"fresh output",
+			"__APANE_DONE_abc123:0:/srv/app__",
+		].join("\n");
+		expect(parseJobOutput(withoutStart, "abc123", "__APANE_START_abc123__")).toEqual({
+			done: true,
+			exitCode: 0,
+			cwd: "/srv/app",
+			output: "fresh output",
 		});
 	});
 });
@@ -568,6 +603,34 @@ describe("PaneService", () => {
 		const listed = await service.get();
 		expect("panes" in listed && listed.panes.map((p) => p.id)).toEqual([pinned.id]);
 		expect(harness.panes.size).toBe(1);
+	});
+
+	test("omits stalled when output advances during wait even if revision stays 0", async () => {
+		const cache = await tempCache();
+		const harness = createHerdrHarness();
+		const service = new PaneService({
+			runner: harness.runner,
+			env: { AGENTS_SSH_CACHE_DIR: cache },
+		});
+
+		const spawned = await service.spawn({ host: "local" });
+		harness.setDelayNextExec(true);
+		const busy = await service.send({ id: spawned.id, input: "long-task", async: true });
+		expect(busy.status).toBe("busy");
+
+		const pane = harness.panes.get("w1:p1")!;
+		pane.revision = 0;
+		pane.fg = { name: "uv", pid: 999 };
+		harness.setOnWaitAppend("progress line\n");
+
+		const progressing = await service.wait({ id: spawned.id, timeout_ms: 50 });
+		expect(progressing.status).toBe("busy");
+		expect(progressing.stalled).toBeUndefined();
+		expect(progressing.output).toContain("progress line");
+
+		const silent = await service.wait({ id: spawned.id, timeout_ms: 50 });
+		expect(silent.status).toBe("busy");
+		expect(silent.stalled).toBe(true);
 	});
 
 	test("rolls back pane creation if initial cd fails", async () => {
