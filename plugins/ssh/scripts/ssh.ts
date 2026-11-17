@@ -1,82 +1,82 @@
 import { createHash } from "node:crypto";
-import { copyFile, cp, mkdir, stat, writeFile } from "node:fs/promises";
+import { copyFile, cp, mkdir, rm, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, posix, resolve } from "node:path";
-import { isLocalHost, type ProcessResult, type ProcessRunner, quoteShell } from "./process";
+import { assertNoControlChars, isLocalHost, type ProcessResult, type ProcessRunner, quoteShell } from "./process";
 import type { CachePaths } from "./state";
 
-export interface SshSettings {
-	connectTimeoutSeconds: number;
-	serverAliveIntervalSeconds: number;
-	serverAliveCountMax: number;
+export interface SshCfg {
+	connectTimeout: number;
+	aliveInterval: number;
+	aliveCountMax: number;
 	controlPersist: string;
-	strictHostKeyChecking: string;
+	strictHostKey: string;
 }
 
 export interface TransferResult {
-	local_path: string;
-	remote_path: string;
+	local: string;
+	remote: string;
 	kind: "file" | "directory";
 }
 
-export function readSshSettings(environment: NodeJS.ProcessEnv = process.env): SshSettings {
+export function readSshCfg(env: NodeJS.ProcessEnv = process.env): SshCfg {
 	return {
-		connectTimeoutSeconds: parsePositiveInt(environment.AGENTS_SSH_CONNECT_TIMEOUT, 15, "AGENTS_SSH_CONNECT_TIMEOUT"),
-		serverAliveIntervalSeconds: parsePositiveInt(environment.AGENTS_SSH_ALIVE_INTERVAL, 60, "AGENTS_SSH_ALIVE_INTERVAL"),
-		serverAliveCountMax: parseNonNegativeInt(environment.AGENTS_SSH_ALIVE_COUNT_MAX, 3, "AGENTS_SSH_ALIVE_COUNT_MAX"),
-		controlPersist: environment.AGENTS_SSH_CONTROL_PERSIST?.trim() || "60m",
-		strictHostKeyChecking: environment.AGENTS_SSH_STRICT_HOST_KEY?.trim() || "accept-new",
+		connectTimeout: parsePositiveInt(env.AGENTS_SSH_CONNECT_TIMEOUT, 15, "AGENTS_SSH_CONNECT_TIMEOUT"),
+		aliveInterval: parsePositiveInt(env.AGENTS_SSH_ALIVE_INTERVAL, 60, "AGENTS_SSH_ALIVE_INTERVAL"),
+		aliveCountMax: parseNonNegativeInt(env.AGENTS_SSH_ALIVE_COUNT_MAX, 3, "AGENTS_SSH_ALIVE_COUNT_MAX"),
+		controlPersist: env.AGENTS_SSH_CONTROL_PERSIST?.trim() || "60m",
+		strictHostKey: env.AGENTS_SSH_STRICT_HOST_KEY?.trim() || "accept-new",
 	};
 }
 
 function parsePositiveInt(raw: string | undefined, fallback: number, name: string): number {
-	if (!raw || raw.trim() === "") return fallback;
-	if (!/^\d+$/.test(raw.trim()) || Number(raw) < 1) throw new Error(`${name} must be a positive integer`);
-	return Number(raw);
+	const val = raw?.trim();
+	if (!val) return fallback;
+	if (!/^\d+$/.test(val) || Number(val) < 1) throw new Error(`${name} must be a positive integer`);
+	return Number(val);
 }
 
 function parseNonNegativeInt(raw: string | undefined, fallback: number, name: string): number {
-	if (!raw || raw.trim() === "") return fallback;
-	if (!/^\d+$/.test(raw.trim())) throw new Error(`${name} must be a non-negative integer`);
-	return Number(raw);
+	const val = raw?.trim();
+	if (!val) return fallback;
+	if (!/^\d+$/.test(val)) throw new Error(`${name} must be a non-negative integer`);
+	return Number(val);
 }
 
-export function buildSshOptions(controlPath: string, settings: SshSettings): string[] {
+export function buildSshOptions(ctrlPath: string, cfg: SshCfg): string[] {
 	return [
-		"-o", `ServerAliveInterval=${settings.serverAliveIntervalSeconds}`,
-		"-o", `ServerAliveCountMax=${settings.serverAliveCountMax}`,
-		"-o", `ConnectTimeout=${settings.connectTimeoutSeconds}`,
+		"-o", `ServerAliveInterval=${cfg.aliveInterval}`,
+		"-o", `ServerAliveCountMax=${cfg.aliveCountMax}`,
+		"-o", `ConnectTimeout=${cfg.connectTimeout}`,
 		"-o", "BatchMode=yes",
-		"-o", `StrictHostKeyChecking=${settings.strictHostKeyChecking}`,
+		"-o", `StrictHostKeyChecking=${cfg.strictHostKey}`,
 		"-o", "ControlMaster=auto",
-		"-o", `ControlPath=${controlPath}`,
-		"-o", `ControlPersist=${settings.controlPersist}`,
+		"-o", `ControlPath=${ctrlPath}`,
+		"-o", `ControlPersist=${cfg.controlPersist}`,
 	];
 }
 
-export function resolveLocalPath(rawPath: string | undefined, defaultBaseDir: string, defaultName?: string): string {
-	if (!rawPath || rawPath.trim() === "") {
-		return defaultName ? join(defaultBaseDir, defaultName) : defaultBaseDir;
-	}
-	const trimmed = rawPath.trim();
+export function resolveLocalPath(raw: string | undefined, baseDir: string, defaultName?: string): string {
+	const trimmed = raw?.trim();
+	if (!trimmed) return defaultName ? join(baseDir, defaultName) : baseDir;
 	const home = homedir();
 	if (trimmed === "~") return home;
 	if (trimmed.startsWith("~/")) return join(home, trimmed.slice(2));
 	if (isAbsolute(trimmed)) return resolve(trimmed);
-	return resolve(defaultBaseDir, trimmed);
+	return resolve(baseDir, trimmed);
 }
 
 export class SshTransport {
 	readonly #paths: CachePaths;
-	readonly #settings: SshSettings;
+	readonly #cfg: SshCfg;
 	readonly #runner: ProcessRunner;
 	readonly #downloadsDir: string;
 
-	constructor(paths: CachePaths, settings: SshSettings, runner: ProcessRunner, downloadsDir?: string) {
+	constructor(paths: CachePaths, cfg: SshCfg, runner: ProcessRunner, downloadsDir?: string) {
 		this.#paths = paths;
-		this.#settings = settings;
+		this.#cfg = cfg;
 		this.#runner = runner;
-		this.#downloadsDir = downloadsDir ?? join(homedir(), "Downloads");
+		this.#downloadsDir = downloadsDir || join(homedir(), "Downloads");
 	}
 
 	async controlPath(host: string): Promise<string> {
@@ -90,112 +90,138 @@ export class SshTransport {
 		return `/tmp/apane-${dirTag}-${hostTag}.sock`;
 	}
 
-	async interactiveSshCommand(host: string, remoteShellCommand: string): Promise<string> {
-		const controlPath = await this.controlPath(host);
+	async interactiveSshCommand(host: string, remoteShellCmd: string): Promise<string> {
+		const ctrlPath = await this.controlPath(host);
 		const args = [
 			"ssh",
 			"-tt",
-			...buildSshOptions(controlPath, this.#settings),
+			...buildSshOptions(ctrlPath, this.#cfg),
 			"--",
 			host,
-			remoteShellCommand,
+			remoteShellCmd,
 		];
 		return `exec ${args.map(quoteShell).join(" ")}`;
 	}
 
-	async exec(host: string, command: string, timeoutMs = 15_000, stdin?: string): Promise<ProcessResult> {
-		const controlPath = await this.controlPath(host);
+	async exec(host: string, cmd: string, timeoutMs = 15_000, stdin?: string): Promise<ProcessResult> {
+		const ctrlPath = await this.controlPath(host);
 		const args = [
 			...(stdin === undefined ? ["-n"] : []),
-			...buildSshOptions(controlPath, this.#settings),
+			...buildSshOptions(ctrlPath, this.#cfg),
 			"--",
 			host,
-			command,
+			cmd,
 		];
-		let result = await this.#runner("ssh", args, timeoutMs, stdin);
-		if (!result.timedOut && result.exitCode === 255 && /Control socket connect failed|mux_client|ControlPath/i.test(result.stderr)) {
-			await this.#runner("ssh", [...buildSshOptions(controlPath, this.#settings), "-O", "exit", "--", host], 3_000).catch(() => undefined);
-			result = await this.#runner("ssh", args, timeoutMs, stdin);
+		let res = await this.#runner("ssh", args, timeoutMs, stdin);
+		if (!res.timedOut && res.exitCode === 255 && /Control socket connect failed|mux_client|ControlPath/i.test(res.stderr)) {
+			await this.#runner("ssh", [...buildSshOptions(ctrlPath, this.#cfg), "-O", "exit", "--", host], 3_000).catch(() => undefined);
+			await rm(ctrlPath, { force: true }).catch(() => undefined);
+			res = await this.#runner("ssh", args, timeoutMs, stdin);
 		}
-		return result;
+		return res;
 	}
 
-	async writeJobScript(host: string, jobId: string, command: string): Promise<string> {
-		const scriptPath = `/tmp/apane_${jobId}.sh`;
+	async writeJobScript(host: string, tok: string, cmd: string): Promise<string> {
+		const scriptPath = `/tmp/apane_${tok}.sh`;
 		if (isLocalHost(host)) {
-			await writeFile(scriptPath, `${command}\n`, { mode: 0o600 });
+			await writeFile(scriptPath, `${cmd}\n`, { mode: 0o600 });
 			return scriptPath;
 		}
-		const res = await this.exec(host, `cat > ${quoteShell(scriptPath)} && chmod 600 ${quoteShell(scriptPath)}`, 15_000, `${command}\n`);
+		const res = await this.exec(host, `cat > ${quoteShell(scriptPath)} && chmod 600 ${quoteShell(scriptPath)}`, 15_000, `${cmd}\n`);
 		if (res.timedOut || res.exitCode !== 0) {
 			throw new Error(`Failed to stage command on ${host}: ${res.stderr.trim() || `exit ${res.exitCode}`}`);
 		}
 		return scriptPath;
 	}
 
-	async download(host: string, cwd: string, remotePath: string, localPath?: string): Promise<TransferResult> {
-		const remoteAbs = posix.resolve(cwd, remotePath);
-		const baseName = posix.basename(remoteAbs) || "download";
-		let localAbs = resolveLocalPath(localPath, this.#downloadsDir, baseName);
+	async download(host: string, cwd: string, remoteRaw: string, localRaw?: string): Promise<TransferResult> {
+		const remoteClean = assertNoControlChars(remoteRaw.trim(), "remote");
+		const localClean = localRaw ? assertNoControlChars(localRaw.trim(), "local") : undefined;
+		const remoteAbs = posix.resolve(cwd, remoteClean);
+		const base = posix.basename(remoteAbs) || "download";
+		let localAbs = resolveLocalPath(localClean, this.#downloadsDir, base);
+		const wantDir = !!localClean && /[\\/]$/.test(localClean);
 
 		if (isLocalHost(host)) {
-			const info = await stat(remoteAbs);
+			const info = await stat(remoteAbs).catch(() => undefined);
+			if (!info) throw new Error(`Remote path not found on ${host}: ${remoteAbs}`);
+			const existingLocal = await stat(localAbs).catch(() => undefined);
 			if (info.isDirectory()) {
+				if (existingLocal?.isFile()) throw new Error(`Local target is an existing file: ${localAbs}`);
+				if ((wantDir || existingLocal?.isDirectory()) && basename(localAbs) !== base) {
+					localAbs = join(localAbs, base);
+				}
 				await mkdir(dirname(localAbs), { recursive: true });
 				await cp(remoteAbs, localAbs, { recursive: true });
-				return { local_path: localAbs, remote_path: remoteAbs, kind: "directory" };
+				return { local: localAbs, remote: remoteAbs, kind: "directory" };
 			}
-			const existingLocal = await stat(localAbs).catch(() => undefined);
-			if (existingLocal?.isDirectory()) localAbs = join(localAbs, baseName);
+			if (wantDir || existingLocal?.isDirectory()) localAbs = join(localAbs, base);
 			await mkdir(dirname(localAbs), { recursive: true });
 			await copyFile(remoteAbs, localAbs);
-			return { local_path: localAbs, remote_path: remoteAbs, kind: "file" };
+			return { local: localAbs, remote: remoteAbs, kind: "file" };
 		}
 
 		const kind = await this.probeRemoteKind(host, remoteAbs);
 		if (kind === "missing") throw new Error(`Remote path not found on ${host}: ${remoteAbs}`);
 
+		const existingLocal = await stat(localAbs).catch(() => undefined);
 		if (kind === "file") {
-			const existingLocal = await stat(localAbs).catch(() => undefined);
-			if (existingLocal?.isDirectory()) localAbs = join(localAbs, baseName);
+			if (wantDir || existingLocal?.isDirectory()) localAbs = join(localAbs, base);
 			await mkdir(dirname(localAbs), { recursive: true });
 			await this.runSftpBatch(host, `get -- ${quoteSftp(remoteAbs)} ${quoteSftp(localAbs)}\n`);
-			return { local_path: localAbs, remote_path: remoteAbs, kind };
+			return { local: localAbs, remote: remoteAbs, kind };
 		}
 
+		if (existingLocal?.isFile()) throw new Error(`Local target is an existing file: ${localAbs}`);
+		if ((wantDir || existingLocal?.isDirectory()) && basename(localAbs) !== base) {
+			localAbs = join(localAbs, base);
+		}
 		await mkdir(dirname(localAbs), { recursive: true });
 		await this.runSftpBatch(host, `get -R -- ${quoteSftp(remoteAbs)} ${quoteSftp(localAbs)}\n`);
-		return { local_path: localAbs, remote_path: remoteAbs, kind };
+		return { local: localAbs, remote: remoteAbs, kind };
 	}
 
-	async upload(host: string, cwd: string, localPath: string, remotePath?: string): Promise<TransferResult> {
-		const localAbs = resolveLocalPath(localPath, this.#downloadsDir);
-		const info = await stat(localAbs);
+	async upload(host: string, cwd: string, localRaw: string, remoteRaw?: string): Promise<TransferResult> {
+		const localClean = assertNoControlChars(localRaw.trim(), "local");
+		const remoteClean = remoteRaw ? assertNoControlChars(remoteRaw.trim(), "remote") : undefined;
+		const localAbs = resolveLocalPath(localClean, this.#downloadsDir);
+		const info = await stat(localAbs).catch(() => undefined);
+		if (!info) throw new Error(`Local path not found: ${localAbs}`);
+
 		const kind: "file" | "directory" = info.isDirectory() ? "directory" : "file";
-		let remoteAbs = remotePath ? posix.resolve(cwd, remotePath) : posix.join(cwd, basename(localAbs));
+		const base = basename(localAbs);
+		const wantDir = !!remoteClean && remoteClean.endsWith("/");
+		let remoteAbs = remoteClean ? posix.resolve(cwd, remoteClean) : posix.join(cwd, base);
+		if (wantDir && posix.basename(remoteAbs) !== base) {
+			remoteAbs = posix.join(remoteAbs, base);
+		}
 
 		if (isLocalHost(host)) {
+			const existingRemote = await stat(remoteAbs).catch(() => undefined);
 			if (kind === "file") {
-				const existingRemote = await stat(remoteAbs).catch(() => undefined);
-				if (existingRemote?.isDirectory()) remoteAbs = posix.join(remoteAbs, basename(localAbs));
+				if (existingRemote?.isDirectory()) remoteAbs = posix.join(remoteAbs, base);
 				await mkdir(posix.dirname(remoteAbs), { recursive: true });
 				await copyFile(localAbs, remoteAbs);
 			} else {
+				if (existingRemote?.isFile()) throw new Error(`Remote target is an existing file on ${host}: ${remoteAbs}`);
+				if (existingRemote?.isDirectory() && posix.basename(remoteAbs) !== base) {
+					remoteAbs = posix.join(remoteAbs, base);
+				}
 				await mkdir(posix.dirname(remoteAbs), { recursive: true });
 				await cp(localAbs, remoteAbs, { recursive: true });
 			}
-			return { local_path: localAbs, remote_path: remoteAbs, kind };
+			return { local: localAbs, remote: remoteAbs, kind };
 		}
 
 		const remoteKind = await this.probeRemoteKind(host, remoteAbs);
 		if (kind === "file") {
-			if (remoteKind === "directory") remoteAbs = posix.join(remoteAbs, basename(localAbs));
+			if (remoteKind === "directory") remoteAbs = posix.join(remoteAbs, base);
 			const prep = await this.exec(host, `mkdir -p -- ${quoteShell(posix.dirname(remoteAbs))}`, 15_000);
 			if (prep.timedOut || prep.exitCode !== 0) {
 				throw new Error(`Failed to prepare remote directory on ${host}: ${prep.stderr.trim() || `exit ${prep.exitCode}`}`);
 			}
 			await this.runSftpBatch(host, `put -- ${quoteSftp(localAbs)} ${quoteSftp(remoteAbs)}\n`);
-			return { local_path: localAbs, remote_path: remoteAbs, kind };
+			return { local: localAbs, remote: remoteAbs, kind };
 		}
 
 		if (remoteKind === "file") throw new Error(`Remote target is an existing file on ${host}: ${remoteAbs}`);
@@ -203,12 +229,13 @@ export class SshTransport {
 		if (prep.timedOut || prep.exitCode !== 0) {
 			throw new Error(`Failed to prepare remote directory on ${host}: ${prep.stderr.trim() || `exit ${prep.exitCode}`}`);
 		}
-		const batch = remoteKind === "directory" && basename(localAbs) === posix.basename(remoteAbs)
-			? `put -R -- ${quoteSftp(localAbs)} ${quoteSftp(posix.dirname(remoteAbs))}\n`
-			: `put -R -- ${quoteSftp(localAbs)} ${quoteSftp(remoteAbs)}\n`;
-
-		await this.runSftpBatch(host, batch);
-		return { local_path: localAbs, remote_path: remoteAbs, kind };
+		if (remoteKind === "directory" && base !== posix.basename(remoteAbs)) {
+			await this.runSftpBatch(host, `put -R -- ${quoteSftp(localAbs)} ${quoteSftp(remoteAbs)}\n`);
+			return { local: localAbs, remote: posix.join(remoteAbs, base), kind };
+		}
+		const target = remoteKind === "directory" ? posix.dirname(remoteAbs) : remoteAbs;
+		await this.runSftpBatch(host, `put -R -- ${quoteSftp(localAbs)} ${quoteSftp(target)}\n`);
+		return { local: localAbs, remote: remoteAbs, kind };
 	}
 
 	private async probeRemoteKind(host: string, remoteAbs: string): Promise<"file" | "directory" | "missing"> {
@@ -224,9 +251,9 @@ export class SshTransport {
 	}
 
 	private async runSftpBatch(host: string, batch: string): Promise<void> {
-		const controlPath = await this.controlPath(host);
+		const ctrlPath = await this.controlPath(host);
 		const args = [
-			...buildSshOptions(controlPath, this.#settings),
+			...buildSshOptions(ctrlPath, this.#cfg),
 			"-b", "-",
 			"--",
 			host,

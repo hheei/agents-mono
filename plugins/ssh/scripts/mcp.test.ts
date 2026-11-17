@@ -24,7 +24,7 @@ describe("ssh MCP server", () => {
 		expect(tools.map((t) => t.name)).toEqual(["list", "spawn", "exec", "wait", "download", "upload", "close"]);
 	});
 
-	test("validates 6-char hex pane ids and delegates tool calls", async () => {
+	test("validates ids, treats empty optional strings as omitted, and delegates tool calls", async () => {
 		const calls: string[] = [];
 		const server = createMcpServer({
 			list: async () => {
@@ -35,12 +35,20 @@ describe("ssh MCP server", () => {
 						host: "mac",
 						status: "idle",
 						cwd: "/tmp",
-						}],
+					}],
 				};
 			},
+			spawn: async (input) => {
+				calls.push(`spawn:${input.host}:${input.cwd ?? "-"}`);
+				return { id: "a1b2c3", host: input.host, status: "idle", cwd: input.cwd ?? "/home/user" };
+			},
 			exec: async (input) => {
-				calls.push(`exec:${input.id}:${input.async ?? false}`);
-				return { id: input.id, status: "done", cwd: "/tmp", exit_code: 0, output: "ok" };
+				calls.push(`exec:${input.id}:${input.cmd}:${input.async ?? false}`);
+				return { id: input.id, status: "idle", cwd: "/tmp", exit_code: 0, output: "ok" };
+			},
+			download: async (input) => {
+				calls.push(`download:${input.id}:${input.remote}:${input.local ?? "-"}`);
+				return { local: "/tmp/Downloads/f.txt", remote: "/tmp/f.txt", kind: "file" };
 			},
 			close: async (input) => {
 				calls.push(`close:${input.id}`);
@@ -48,37 +56,67 @@ describe("ssh MCP server", () => {
 			},
 		});
 
-		const invalid = await server.handle({
+		const invalidId = await server.handle({
 			jsonrpc: "2.0",
 			id: 3,
 			method: "tools/call",
-			params: { name: "exec", arguments: { id: "A1B2C3", command: "ls" } },
+			params: { name: "exec", arguments: { id: "A1B2C3", cmd: "ls" } },
 		});
-		expect(invalid?.error?.code).toBe(-32602);
+		expect(invalidId?.error?.code).toBe(-32602);
 
-		const listRes = await server.handle({
+		const emptyHost = await server.handle({
 			jsonrpc: "2.0",
 			id: 4,
 			method: "tools/call",
-			params: { name: "list" },
+			params: { name: "spawn", arguments: { host: "" } },
 		});
-		expect((listRes?.result as { content: Array<{ text: string }> }).content[0].text).toContain("a1b2c3");
+		expect(emptyHost?.error?.code).toBe(-32602);
 
-		const execRes = await server.handle({
+		const spawnEmptyCwd = await server.handle({
 			jsonrpc: "2.0",
 			id: 5,
 			method: "tools/call",
-			params: { name: "exec", arguments: { id: "a1b2c3", command: "ls", async: false } },
+			params: { name: "spawn", arguments: { host: "mac", cwd: "" } },
+		});
+		expect((spawnEmptyCwd?.result as { content: Array<{ text: string }> }).content[0].text).toBe("a1b2c3 /home/user");
+
+		const dlEmptyLocal = await server.handle({
+			jsonrpc: "2.0",
+			id: 6,
+			method: "tools/call",
+			params: { name: "download", arguments: { id: "a1b2c3", remote: "f.txt", local: "  " } },
+		});
+		expect((dlEmptyLocal?.result as { content: Array<{ text: string }> }).content[0].text).toBe("/tmp/Downloads/f.txt");
+
+		const listRes = await server.handle({
+			jsonrpc: "2.0",
+			id: 7,
+			method: "tools/call",
+			params: { name: "list" },
+		});
+		expect((listRes?.result as { content: Array<{ text: string }> }).content[0].text).toBe("a1b2c3 mac idle /tmp");
+
+		const execRes = await server.handle({
+			jsonrpc: "2.0",
+			id: 8,
+			method: "tools/call",
+			params: { name: "exec", arguments: { id: "a1b2c3", cmd: "ls", async: false } },
 		});
 		expect((execRes?.result as { structuredContent: { exit_code: number } }).structuredContent.exit_code).toBe(0);
 
 		const closeRes = await server.handle({
 			jsonrpc: "2.0",
-			id: 6,
+			id: 9,
 			method: "tools/call",
 			params: { name: "close", arguments: { id: "a1b2c3" } },
 		});
 		expect((closeRes?.result as { content: Array<{ text: string }> }).content[0].text).toBe("a1b2c3 closed");
-		expect(calls).toEqual(["list", "exec:a1b2c3:false", "close:a1b2c3"]);
+		expect(calls).toEqual([
+			"spawn:mac:-",
+			"download:a1b2c3:f.txt:-",
+			"list",
+			"exec:a1b2c3:ls:false",
+			"close:a1b2c3",
+		]);
 	});
 });

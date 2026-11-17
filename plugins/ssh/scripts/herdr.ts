@@ -59,8 +59,8 @@ export class HerdrClient {
 		return json.workspaces ?? [];
 	}
 
-	async listPanes(target: HerdrTarget, workspaceId?: string): Promise<HerdrPane[]> {
-		const args = workspaceId ? ["pane", "list", "--workspace", workspaceId] : ["pane", "list"];
+	async listPanes(target: HerdrTarget, wsId?: string): Promise<HerdrPane[]> {
+		const args = wsId ? ["pane", "list", "--workspace", wsId] : ["pane", "list"];
 		const json = await this.execJson<{ panes: HerdrPane[] }>(target, args, 5_000);
 		return json.panes ?? [];
 	}
@@ -80,22 +80,28 @@ export class HerdrClient {
 
 	async allocatePane(
 		target: HerdrTarget,
+		label: string,
 		cwd?: string,
-	): Promise<{ workspaceId: string; paneId: string }> {
+	): Promise<{ wsId: string; tabId: string; paneId: string }> {
 		const workspaces = await this.listWorkspaces(target);
 		const existing = workspaces.find((ws) => ws.label === WORKSPACE_LABEL);
 		if (existing) {
-			const panes = await this.listPanes(target, existing.workspace_id);
-			const anchor = panes[0];
-			if (anchor) {
-				const direction = panes.length % 2 === 1 ? "right" : "down";
-				const args = ["pane", "split", anchor.pane_id, "--direction", direction, "--no-focus"];
+			try {
+				const args = ["tab", "create", "--workspace", existing.workspace_id, "--label", label, "--no-focus"];
 				if (cwd) args.push("--cwd", cwd);
-				const split = await this.execJson<{ pane: { pane_id: string; workspace_id?: string } }>(target, args, 10_000);
+				const created = await this.execJson<{
+					tab: { tab_id: string; workspace_id?: string };
+					root_pane: { pane_id: string };
+				}>(target, args, 10_000);
 				return {
-					workspaceId: split.pane.workspace_id ?? existing.workspace_id,
-					paneId: split.pane.pane_id,
+					wsId: created.tab.workspace_id ?? existing.workspace_id,
+					tabId: created.tab.tab_id,
+					paneId: created.root_pane.pane_id,
 				};
+			} catch (error) {
+				if (!/workspace_not_found|not found/i.test(error instanceof Error ? error.message : String(error))) {
+					throw error;
+				}
 			}
 		}
 
@@ -103,12 +109,22 @@ export class HerdrClient {
 		if (cwd) args.push("--cwd", cwd);
 		const created = await this.execJson<{
 			workspace: { workspace_id: string };
+			tab: { tab_id: string };
 			root_pane: { pane_id: string };
 		}>(target, args, 10_000);
+		await this.renameTab(target, created.tab.tab_id, label).catch(() => undefined);
 		return {
-			workspaceId: created.workspace.workspace_id,
+			wsId: created.workspace.workspace_id,
+			tabId: created.tab.tab_id,
 			paneId: created.root_pane.pane_id,
 		};
+	}
+
+	async renameTab(target: HerdrTarget, tabId: string, label: string): Promise<void> {
+		const res = await this.runHerdr(target, ["tab", "rename", tabId, label], 5_000);
+		if (res.timedOut || res.exitCode !== 0) {
+			throw new Error(`herdr tab rename failed: ${formatHerdrError(res)}`);
+		}
 	}
 
 	async renamePane(target: HerdrTarget, paneId: string, label: string): Promise<void> {
@@ -118,8 +134,8 @@ export class HerdrClient {
 		}
 	}
 
-	async runInPane(target: HerdrTarget, paneId: string, command: string): Promise<void> {
-		const res = await this.runHerdr(target, ["pane", "run", paneId, command], 10_000);
+	async runInPane(target: HerdrTarget, paneId: string, cmd: string): Promise<void> {
+		const res = await this.runHerdr(target, ["pane", "run", paneId, cmd], 10_000);
 		if (res.timedOut || res.exitCode !== 0) {
 			throw new Error(`herdr pane run failed: ${formatHerdrError(res)}`);
 		}
@@ -145,8 +161,7 @@ export class HerdrClient {
 		const res = await this.runHerdr(target, args, timeoutMs + 5_000);
 		if (!res.timedOut && res.exitCode === 0) return true;
 		if (res.timedOut) return false;
-		const stderr = res.stderr.trim();
-		if (/timeout|timed out/i.test(stderr)) return false;
+		if (/timeout|timed out/i.test(res.stderr.trim())) return false;
 		throw new Error(`herdr pane wait-output failed: ${formatHerdrError(res)}`);
 	}
 

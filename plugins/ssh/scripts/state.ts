@@ -4,31 +4,29 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 
-export type HerdrMode = "local-herdr" | "local-herdr-ssh" | "remote-herdr";
+export type HerdrMode = "local" | "ssh" | "remote";
 
-export interface ActiveJob {
-	jobId: string;
-	command: string;
-	startedAt: number;
-	startMarker: string;
-	donePrefix: string;
-	scriptPath: string;
+export interface JobState {
+	tok: string;
+	mark: string;
+	exitCode?: number;
+	doneCwd?: string;
 }
 
 export interface PaneRecord {
 	id: string;
 	host: string;
-	backend: "herdr";
 	mode: HerdrMode;
-	herdrWorkspaceId: string;
-	herdrPaneId: string;
+	wsId: string;
+	tabId: string;
+	paneId: string;
 	cwd: string;
-	status: "idle" | "running";
-	idleTtlSec: number;
+	status: "idle" | "busy";
+	ttl: number;
 	createdAt: number;
-	lastUsedAt: number;
-	activeJob?: ActiveJob;
-	lastJob?: ActiveJob;
+	usedAt: number;
+	job?: JobState;
+	lastJob?: JobState;
 }
 
 export interface PaneStateFile {
@@ -41,26 +39,25 @@ export interface CachePaths {
 	stateFile: string;
 	lockDir: string;
 	controlDir: string;
-	downloadsDir: string;
 }
 
 const LOCK_TIMEOUT_MS = 10_000;
 const LOCK_STALE_MS = 30_000;
 const LOCK_RETRY_MS = 40;
 
-export function resolveCachePaths(environment: NodeJS.ProcessEnv = process.env): CachePaths {
-	const root = environment.AGENTS_SSH_CACHE_DIR?.trim()
-		|| join(environment.XDG_CACHE_HOME?.trim() || join(homedir(), ".cache"), "agents-ssh");
+export function resolveCachePaths(env: NodeJS.ProcessEnv = process.env): CachePaths {
+	const custom = env.AGENTS_SSH_CACHE_DIR?.trim();
+	const xdg = env.XDG_CACHE_HOME?.trim();
+	const root = custom || join(xdg || join(homedir(), ".cache"), "agents-ssh");
 	return {
 		root,
 		stateFile: join(root, "state.json"),
 		lockDir: join(root, "state.lock"),
 		controlDir: join(root, "control"),
-		downloadsDir: join(root, "downloads"),
 	};
 }
 
-export function generateHexId(existing: Iterable<string>): string {
+export function generateHexId(existing: Iterable<string> = []): string {
 	const taken = new Set(existing);
 	for (let attempt = 0; attempt < 64; attempt += 1) {
 		const candidate = randomBytes(3).toString("hex");
@@ -103,19 +100,28 @@ export async function readState(paths: CachePaths): Promise<PaneStateFile> {
 		const raw = await readFile(paths.stateFile, "utf8");
 		const parsed = JSON.parse(raw) as Partial<PaneStateFile>;
 		if (parsed && Array.isArray(parsed.panes)) {
-			return { version: 1, panes: parsed.panes };
+			return { version: 1, panes: parsed.panes.filter(isValidRecord) };
 		}
-	} catch (error) {
-		if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
-			// Fall through to empty state if file was corrupt.
-		}
+	} catch {
+		// Fall through to empty state if missing or corrupt.
 	}
 	return { version: 1, panes: [] };
 }
 
 export async function writeState(paths: CachePaths, state: PaneStateFile): Promise<void> {
 	await mkdir(paths.root, { recursive: true, mode: 0o700 });
-	const tempPath = `${paths.stateFile}.${process.pid}.${Date.now()}.tmp`;
-	await writeFile(tempPath, `${JSON.stringify(state, null, 2)}\n`, { mode: 0o600 });
-	await rename(tempPath, paths.stateFile);
+	const tmp = `${paths.stateFile}.${process.pid}.${Date.now()}.tmp`;
+	await writeFile(tmp, `${JSON.stringify(state, null, 2)}\n`, { mode: 0o600 });
+	await rename(tmp, paths.stateFile);
+}
+
+function isValidRecord(value: unknown): value is PaneRecord {
+	if (!value || typeof value !== "object") return false;
+	const r = value as Partial<PaneRecord>;
+	return typeof r.id === "string"
+		&& typeof r.host === "string"
+		&& typeof r.wsId === "string"
+		&& typeof r.paneId === "string"
+		&& typeof r.cwd === "string"
+		&& (r.status === "idle" || r.status === "busy");
 }

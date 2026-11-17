@@ -16,8 +16,8 @@ export type ProcessRunner = (
 
 const OUTPUT_EDGE_BYTES = 8 * 1024;
 
-export function validateHost(value: string): string {
-	const host = value.trim();
+export function validateHost(raw: string): string {
+	const host = raw.trim();
 	if (host === "") throw new Error("host must be a non-empty string");
 	if (host.startsWith("-")) throw new Error("host must not start with '-'");
 	if (/[\0\r\n\t ]/.test(host)) throw new Error("host must not contain whitespace");
@@ -25,12 +25,33 @@ export function validateHost(value: string): string {
 	return host;
 }
 
-export function validateHexId(value: string): string {
-	const id = value.trim();
+export function validateHexId(raw: string): string {
+	const id = raw.trim();
 	if (!/^[0-9a-f]{6}$/.test(id)) {
 		throw new Error("id must be a 6-character lowercase hex pane id");
 	}
 	return id;
+}
+
+export function optString(raw: unknown, label: string): string | undefined {
+	if (raw === undefined) return undefined;
+	if (typeof raw !== "string") throw new Error(`${label} must be a string`);
+	const trimmed = raw.trim();
+	return trimmed === "" ? undefined : trimmed;
+}
+
+export function reqString(raw: unknown, label: string): string {
+	if (typeof raw !== "string" || raw.trim() === "") {
+		throw new Error(`${label} must be a non-empty string`);
+	}
+	return raw.trim();
+}
+
+export function assertNoControlChars(value: string, label: string): string {
+	if (/[\0\r\n]/.test(value)) {
+		throw new Error(`${label} must not contain NUL, CR, or LF`);
+	}
+	return value;
 }
 
 export function quoteShell(value: string): string {
@@ -83,15 +104,15 @@ class BoundedOutput {
 	#total = 0;
 
 	append(chunk: Buffer | string): void {
-		const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-		this.#total += buffer.length;
+		const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+		this.#total += buf.length;
 		if (this.#full.length <= OUTPUT_EDGE_BYTES * 2) {
-			this.#full = Buffer.concat([this.#full, buffer]).subarray(0, OUTPUT_EDGE_BYTES * 2);
+			this.#full = Buffer.concat([this.#full, buf]).subarray(0, OUTPUT_EDGE_BYTES * 2);
 		}
 		if (this.#head.length < OUTPUT_EDGE_BYTES) {
-			this.#head = Buffer.concat([this.#head, buffer]).subarray(0, OUTPUT_EDGE_BYTES);
+			this.#head = Buffer.concat([this.#head, buf]).subarray(0, OUTPUT_EDGE_BYTES);
 		}
-		this.#tail = Buffer.concat([this.#tail, buffer]);
+		this.#tail = Buffer.concat([this.#tail, buf]);
 		if (this.#tail.length > OUTPUT_EDGE_BYTES) {
 			this.#tail = this.#tail.subarray(-OUTPUT_EDGE_BYTES);
 		}
@@ -100,25 +121,25 @@ class BoundedOutput {
 	value(): string {
 		if (this.#total <= OUTPUT_EDGE_BYTES * 2) return this.#full.toString("utf8");
 		const omitted = this.#total - OUTPUT_EDGE_BYTES * 2;
-		return `${this.#head.toString("utf8")}\n...[output truncated; omitted ${formatByteCount(omitted)}]...\n${this.#tail.toString("utf8")}`;
+		return `${this.#head.toString("utf8")}\n...[output truncated; omitted ${formatBytes(omitted)}]...\n${this.#tail.toString("utf8")}`;
 	}
 }
 
 export function truncateOutput(value: string): string {
-	const buffer = Buffer.from(value, "utf8");
-	if (buffer.length <= OUTPUT_EDGE_BYTES * 2) return value;
-	const omitted = buffer.length - OUTPUT_EDGE_BYTES * 2;
-	return `${buffer.subarray(0, OUTPUT_EDGE_BYTES).toString("utf8")}\n...[output truncated; omitted ${formatByteCount(omitted)}]...\n${buffer.subarray(-OUTPUT_EDGE_BYTES).toString("utf8")}`;
+	const buf = Buffer.from(value, "utf8");
+	if (buf.length <= OUTPUT_EDGE_BYTES * 2) return value;
+	const omitted = buf.length - OUTPUT_EDGE_BYTES * 2;
+	return `${buf.subarray(0, OUTPUT_EDGE_BYTES).toString("utf8")}\n...[output truncated; omitted ${formatBytes(omitted)}]...\n${buf.subarray(-OUTPUT_EDGE_BYTES).toString("utf8")}`;
 }
 
-function formatByteCount(bytes: number): string {
+function formatBytes(bytes: number): string {
 	const units = ["bytes", "KiB", "MiB", "GiB"];
-	let value = bytes;
-	let unitIndex = 0;
-	while (value >= 1024 && unitIndex < units.length - 1) {
-		value /= 1024;
-		unitIndex += 1;
+	let val = bytes;
+	let idx = 0;
+	while (val >= 1024 && idx < units.length - 1) {
+		val /= 1024;
+		idx += 1;
 	}
-	const formatted = Number.isInteger(value) ? String(value) : value.toFixed(1).replace(/\.0$/, "");
-	return `${formatted} ${units[unitIndex]}`;
+	const formatted = Number.isInteger(val) ? String(val) : val.toFixed(1).replace(/\.0$/, "");
+	return `${formatted} ${units[idx]}`;
 }

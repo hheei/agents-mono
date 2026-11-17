@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 
-import { validateHexId, validateHost } from "./process";
-import { type CloseResult, type ExecResult, PaneService, type PaneSummary } from "./service";
+import { optString, validateHexId, validateHost } from "./process";
+import { type CloseResult, type ExecResult, type PaneInfo, PaneService } from "./service";
 import type { TransferResult } from "./ssh";
 
 type JsonRpcId = string | number | null;
@@ -21,12 +21,12 @@ interface JsonRpcResponse {
 }
 
 interface McpServerOptions {
-	list?: () => Promise<{ panes: PaneSummary[] }>;
-	spawn?: (input: { host: string; cwd?: string; idle_ttl_sec?: number }) => Promise<PaneSummary>;
-	exec?: (input: { id: string; command: string; async?: boolean; timeout_ms?: number }) => Promise<ExecResult>;
+	list?: () => Promise<{ panes: PaneInfo[] }>;
+	spawn?: (input: { host: string; cwd?: string; ttl?: number }) => Promise<PaneInfo>;
+	exec?: (input: { id: string; cmd: string; async?: boolean; timeout_ms?: number }) => Promise<ExecResult>;
 	wait?: (input: { id: string; timeout_ms?: number; lines?: number }) => Promise<ExecResult>;
-	download?: (input: { id: string; remote_path: string; local_path?: string }) => Promise<TransferResult>;
-	upload?: (input: { id: string; local_path: string; remote_path?: string }) => Promise<TransferResult>;
+	download?: (input: { id: string; remote: string; local?: string }) => Promise<TransferResult>;
+	upload?: (input: { id: string; local: string; remote?: string }) => Promise<TransferResult>;
 	close?: (input: { id: string }) => Promise<CloseResult>;
 }
 
@@ -46,8 +46,8 @@ const TOOLS = [
 			type: "object",
 			properties: {
 				host: { type: "string", minLength: 1 },
-				cwd: { type: "string", minLength: 1 },
-				idle_ttl_sec: { type: "integer", minimum: 0 },
+				cwd: { type: "string" },
+				ttl: { type: "integer", minimum: 0 },
 			},
 			required: ["host"],
 			additionalProperties: false,
@@ -60,17 +60,17 @@ const TOOLS = [
 			type: "object",
 			properties: {
 				id: { type: "string", pattern: "^[0-9a-f]{6}$" },
-				command: { type: "string", minLength: 1 },
+				cmd: { type: "string", minLength: 1 },
 				async: { type: "boolean" },
 				timeout_ms: { type: "integer", minimum: 1, maximum: 300000 },
 			},
-			required: ["id", "command"],
+			required: ["id", "cmd"],
 			additionalProperties: false,
 		},
 	},
 	{
 		name: "wait",
-		description: "Wait for a running command or read pane output.",
+		description: "Wait for a busy pane to become idle, or read recent output.",
 		inputSchema: {
 			type: "object",
 			properties: {
@@ -89,10 +89,10 @@ const TOOLS = [
 			type: "object",
 			properties: {
 				id: { type: "string", pattern: "^[0-9a-f]{6}$" },
-				remote_path: { type: "string", minLength: 1 },
-				local_path: { type: "string", minLength: 1 },
+				remote: { type: "string", minLength: 1 },
+				local: { type: "string" },
 			},
-			required: ["id", "remote_path"],
+			required: ["id", "remote"],
 			additionalProperties: false,
 		},
 	},
@@ -103,10 +103,10 @@ const TOOLS = [
 			type: "object",
 			properties: {
 				id: { type: "string", pattern: "^[0-9a-f]{6}$" },
-				local_path: { type: "string", minLength: 1 },
-				remote_path: { type: "string", minLength: 1 },
+				local: { type: "string", minLength: 1 },
+				remote: { type: "string" },
 			},
-			required: ["id", "local_path"],
+			required: ["id", "local"],
 			additionalProperties: false,
 		},
 	},
@@ -124,38 +124,38 @@ const TOOLS = [
 	},
 ];
 
-export function createMcpServer(options: McpServerOptions = {}) {
+export function createMcpServer(opts: McpServerOptions = {}) {
 	const service = new PaneService();
 	const ops = {
-		list: options.list ?? (() => service.list()),
-		spawn: options.spawn ?? ((input) => service.spawn(input)),
-		exec: options.exec ?? ((input) => service.exec(input)),
-		wait: options.wait ?? ((input) => service.wait(input)),
-		download: options.download ?? ((input) => service.download(input)),
-		upload: options.upload ?? ((input) => service.upload(input)),
-		close: options.close ?? ((input) => service.close(input)),
+		list: opts.list ?? (() => service.list()),
+		spawn: opts.spawn ?? ((input) => service.spawn(input)),
+		exec: opts.exec ?? ((input) => service.exec(input)),
+		wait: opts.wait ?? ((input) => service.wait(input)),
+		download: opts.download ?? ((input) => service.download(input)),
+		upload: opts.upload ?? ((input) => service.upload(input)),
+		close: opts.close ?? ((input) => service.close(input)),
 	};
 
 	return {
-		async handle(message: JsonRpcRequest): Promise<JsonRpcResponse | undefined> {
-			const id = message.id ?? null;
-			switch (message.method) {
+		async handle(msg: JsonRpcRequest): Promise<JsonRpcResponse | undefined> {
+			const id = msg.id ?? null;
+			switch (msg.method) {
 				case "initialize":
-					return result(id, {
-						protocolVersion: requestedProtocolVersion(message.params),
+					return ok(id, {
+						protocolVersion: requestedProtocol(msg.params),
 						serverInfo: SERVER_INFO,
 						capabilities: { tools: {} },
 					});
 				case "notifications/initialized":
 					return undefined;
 				case "ping":
-					return result(id, {});
+					return ok(id, {});
 				case "tools/list":
-					return result(id, { tools: TOOLS });
+					return ok(id, { tools: TOOLS });
 				case "tools/call":
-					return await callTool(id, message.params, ops);
+					return await callTool(id, msg.params, ops);
 				default:
-					return failure(id, -32601, `Method not found: ${message.method}`);
+					return err(id, -32601, `Method not found: ${msg.method}`);
 			}
 		},
 	};
@@ -167,232 +167,232 @@ async function callTool(
 	ops: Required<McpServerOptions>,
 ): Promise<JsonRpcResponse> {
 	if (!params || typeof params !== "object" || Array.isArray(params)) {
-		return failure(id, -32602, "tools/call params must be an object");
+		return err(id, -32602, "tools/call params must be an object");
 	}
-	const record = params as Record<string, unknown>;
-	const name = record.name;
-	if (typeof name !== "string") return failure(id, -32602, "Unknown tool");
-	const rawArgs = record.arguments;
-	if (name === "list" && rawArgs === undefined) {
-		return await runOp(id, ops.list, formatList);
+	const { name, arguments: rawArgs } = params as { name?: unknown; arguments?: unknown };
+	const args = rawArgs === undefined ? {} : rawArgs;
+	if (!args || typeof args !== "object" || Array.isArray(args)) {
+		return err(id, -32602, "arguments must be an object");
 	}
-	if (!rawArgs || typeof rawArgs !== "object" || Array.isArray(rawArgs)) {
-		return failure(id, -32602, `${name} arguments must be an object`);
-	}
-	const args = rawArgs as Record<string, unknown>;
+	const a = args as Record<string, unknown>;
 
 	switch (name) {
 		case "list":
-			if (Object.keys(args).length > 0) return failure(id, -32602, "list takes no arguments");
+			if (Object.keys(a).length > 0) return err(id, -32602, "list takes no arguments");
 			return await runOp(id, ops.list, formatList);
 
 		case "spawn": {
-			if (typeof args.host !== "string") return failure(id, -32602, "spawn.host must be a string");
+			if (typeof a.host !== "string") return err(id, -32602, "spawn.host must be a string");
 			try {
-				validateHost(args.host);
-			} catch (error) {
-				return failure(id, -32602, error instanceof Error ? error.message : String(error));
+				validateHost(a.host);
+			} catch (e) {
+				return err(id, -32602, e instanceof Error ? e.message : String(e));
 			}
-			if (args.cwd !== undefined && (typeof args.cwd !== "string" || !args.cwd.trim())) {
-				return failure(id, -32602, "spawn.cwd must be a non-empty string");
+			let cwd: string | undefined;
+			try {
+				cwd = optString(a.cwd, "spawn.cwd");
+			} catch (e) {
+				return err(id, -32602, e instanceof Error ? e.message : String(e));
 			}
-			if (args.idle_ttl_sec !== undefined && (!Number.isInteger(args.idle_ttl_sec) || (args.idle_ttl_sec as number) < 0)) {
-				return failure(id, -32602, "spawn.idle_ttl_sec must be a non-negative integer");
+			if (a.ttl !== undefined && (!Number.isInteger(a.ttl) || (a.ttl as number) < 0)) {
+				return err(id, -32602, "spawn.ttl must be a non-negative integer");
 			}
-			if (Object.keys(args).some((k) => !["host", "cwd", "idle_ttl_sec"].includes(k))) {
-				return failure(id, -32602, "spawn received an unknown argument");
+			if (Object.keys(a).some((k) => !["host", "cwd", "ttl"].includes(k))) {
+				return err(id, -32602, "spawn received an unknown argument");
 			}
 			return await runOp(
 				id,
-				() => ops.spawn(args as { host: string; cwd?: string; idle_ttl_sec?: number }),
+				() => ops.spawn({ host: a.host as string, cwd, ttl: a.ttl as number | undefined }),
 				formatPane,
 			);
 		}
 
 		case "exec": {
-			const err = validatePaneIdArg(args.id, "exec.id");
-			if (err) return failure(id, -32602, err);
-			if (typeof args.command !== "string" || args.command.length === 0 || args.command.includes("\0")) {
-				return failure(id, -32602, "exec.command must be a non-empty string");
+			const idErr = checkPaneId(a.id, "exec.id");
+			if (idErr) return err(id, -32602, idErr);
+			if (typeof a.cmd !== "string" || a.cmd.trim() === "" || a.cmd.includes("\0")) {
+				return err(id, -32602, "exec.cmd must be a non-empty string");
 			}
-			if (args.async !== undefined && typeof args.async !== "boolean") {
-				return failure(id, -32602, "exec.async must be a boolean");
+			if (a.async !== undefined && typeof a.async !== "boolean") {
+				return err(id, -32602, "exec.async must be a boolean");
 			}
-			if (args.timeout_ms !== undefined && (!Number.isInteger(args.timeout_ms) || (args.timeout_ms as number) < 1 || (args.timeout_ms as number) > 300000)) {
-				return failure(id, -32602, "exec.timeout_ms must be between 1 and 300000");
+			if (a.timeout_ms !== undefined && (!Number.isInteger(a.timeout_ms) || (a.timeout_ms as number) < 1 || (a.timeout_ms as number) > 300000)) {
+				return err(id, -32602, "exec.timeout_ms must be between 1 and 300000");
 			}
-			if (Object.keys(args).some((k) => !["id", "command", "async", "timeout_ms"].includes(k))) {
-				return failure(id, -32602, "exec received an unknown argument");
+			if (Object.keys(a).some((k) => !["id", "cmd", "async", "timeout_ms"].includes(k))) {
+				return err(id, -32602, "exec received an unknown argument");
 			}
 			return await runOp(
 				id,
-				() => ops.exec(args as { id: string; command: string; async?: boolean; timeout_ms?: number }),
+				() => ops.exec(a as { id: string; cmd: string; async?: boolean; timeout_ms?: number }),
 				formatExec,
 			);
 		}
 
 		case "wait": {
-			const err = validatePaneIdArg(args.id, "wait.id");
-			if (err) return failure(id, -32602, err);
-			if (args.timeout_ms !== undefined && (!Number.isInteger(args.timeout_ms) || (args.timeout_ms as number) < 1 || (args.timeout_ms as number) > 300000)) {
-				return failure(id, -32602, "wait.timeout_ms must be between 1 and 300000");
+			const idErr = checkPaneId(a.id, "wait.id");
+			if (idErr) return err(id, -32602, idErr);
+			if (a.timeout_ms !== undefined && (!Number.isInteger(a.timeout_ms) || (a.timeout_ms as number) < 1 || (a.timeout_ms as number) > 300000)) {
+				return err(id, -32602, "wait.timeout_ms must be between 1 and 300000");
 			}
-			if (args.lines !== undefined && (!Number.isInteger(args.lines) || (args.lines as number) < 1 || (args.lines as number) > 10000)) {
-				return failure(id, -32602, "wait.lines must be between 1 and 10000");
+			if (a.lines !== undefined && (!Number.isInteger(a.lines) || (a.lines as number) < 1 || (a.lines as number) > 10000)) {
+				return err(id, -32602, "wait.lines must be between 1 and 10000");
 			}
-			if (Object.keys(args).some((k) => !["id", "timeout_ms", "lines"].includes(k))) {
-				return failure(id, -32602, "wait received an unknown argument");
+			if (Object.keys(a).some((k) => !["id", "timeout_ms", "lines"].includes(k))) {
+				return err(id, -32602, "wait received an unknown argument");
 			}
 			return await runOp(
 				id,
-				() => ops.wait(args as { id: string; timeout_ms?: number; lines?: number }),
+				() => ops.wait(a as { id: string; timeout_ms?: number; lines?: number }),
 				formatExec,
 			);
 		}
 
 		case "download": {
-			const err = validatePaneIdArg(args.id, "download.id");
-			if (err) return failure(id, -32602, err);
-			if (typeof args.remote_path !== "string" || !args.remote_path.trim()) {
-				return failure(id, -32602, "download.remote_path must be a non-empty string");
+			const idErr = checkPaneId(a.id, "download.id");
+			if (idErr) return err(id, -32602, idErr);
+			if (typeof a.remote !== "string" || !a.remote.trim()) {
+				return err(id, -32602, "download.remote must be a non-empty string");
 			}
-			if (args.local_path !== undefined && (typeof args.local_path !== "string" || !args.local_path.trim())) {
-				return failure(id, -32602, "download.local_path must be a non-empty string");
+			let local: string | undefined;
+			try {
+				local = optString(a.local, "download.local");
+			} catch (e) {
+				return err(id, -32602, e instanceof Error ? e.message : String(e));
 			}
-			if (Object.keys(args).some((k) => !["id", "remote_path", "local_path"].includes(k))) {
-				return failure(id, -32602, "download received an unknown argument");
+			if (Object.keys(a).some((k) => !["id", "remote", "local"].includes(k))) {
+				return err(id, -32602, "download received an unknown argument");
 			}
 			return await runOp(
 				id,
-				() => ops.download(args as { id: string; remote_path: string; local_path?: string }),
-				(v) => v.local_path,
+				() => ops.download({ id: a.id as string, remote: a.remote as string, local }),
+				(v) => v.local,
 			);
 		}
 
 		case "upload": {
-			const err = validatePaneIdArg(args.id, "upload.id");
-			if (err) return failure(id, -32602, err);
-			if (typeof args.local_path !== "string" || !args.local_path.trim()) {
-				return failure(id, -32602, "upload.local_path must be a non-empty string");
+			const idErr = checkPaneId(a.id, "upload.id");
+			if (idErr) return err(id, -32602, idErr);
+			if (typeof a.local !== "string" || !a.local.trim()) {
+				return err(id, -32602, "upload.local must be a non-empty string");
 			}
-			if (args.remote_path !== undefined && (typeof args.remote_path !== "string" || !args.remote_path.trim())) {
-				return failure(id, -32602, "upload.remote_path must be a non-empty string");
+			let remote: string | undefined;
+			try {
+				remote = optString(a.remote, "upload.remote");
+			} catch (e) {
+				return err(id, -32602, e instanceof Error ? e.message : String(e));
 			}
-			if (Object.keys(args).some((k) => !["id", "local_path", "remote_path"].includes(k))) {
-				return failure(id, -32602, "upload received an unknown argument");
+			if (Object.keys(a).some((k) => !["id", "local", "remote"].includes(k))) {
+				return err(id, -32602, "upload received an unknown argument");
 			}
 			return await runOp(
 				id,
-				() => ops.upload(args as { id: string; local_path: string; remote_path?: string }),
-				(v) => v.remote_path,
+				() => ops.upload({ id: a.id as string, local: a.local as string, remote }),
+				(v) => v.remote,
 			);
 		}
 
 		case "close": {
-			const err = validatePaneIdArg(args.id, "close.id");
-			if (err) return failure(id, -32602, err);
-			if (Object.keys(args).some((k) => k !== "id")) {
-				return failure(id, -32602, "close received an unknown argument");
+			const idErr = checkPaneId(a.id, "close.id");
+			if (idErr) return err(id, -32602, idErr);
+			if (Object.keys(a).some((k) => k !== "id")) {
+				return err(id, -32602, "close received an unknown argument");
 			}
 			return await runOp(
 				id,
-				() => ops.close(args as { id: string }),
+				() => ops.close(a as { id: string }),
 				(v) => `${v.id} ${v.closed ? "closed" : "not_found"}`,
 			);
 		}
 
 		default:
-			return failure(id, -32602, "Unknown tool");
+			return err(id, -32602, "Unknown tool");
 	}
 }
 
-function validatePaneIdArg(value: unknown, label: string): string | undefined {
+function checkPaneId(value: unknown, label: string): string | undefined {
 	if (typeof value !== "string") return `${label} must be a 6-character lowercase hex string`;
 	try {
 		validateHexId(value);
 		return undefined;
-	} catch (error) {
-		return error instanceof Error ? error.message : String(error);
+	} catch (e) {
+		return e instanceof Error ? e.message : String(e);
 	}
 }
 
 async function runOp<T>(id: JsonRpcId, op: () => Promise<T>, format: (v: T) => string): Promise<JsonRpcResponse> {
 	try {
 		const value = await op();
-		return result(id, { content: [{ type: "text", text: format(value) }], structuredContent: value });
-	} catch (error) {
-		return result(id, {
+		return ok(id, { content: [{ type: "text", text: format(value) }], structuredContent: value });
+	} catch (e) {
+		return ok(id, {
 			isError: true,
-			content: [{ type: "text", text: error instanceof Error ? error.message : String(error) }],
+			content: [{ type: "text", text: e instanceof Error ? e.message : String(e) }],
 		});
 	}
 }
 
-function formatList(v: { panes: PaneSummary[] }): string {
+function formatList(v: { panes: PaneInfo[] }): string {
 	if (v.panes.length === 0) return "none";
-	return v.panes
-		.map((p) => `${p.id} ${p.host} ${p.status} ${p.cwd}${p.job_id ? ` ${p.job_id}` : ""}`)
-		.join("\n");
+	return v.panes.map((p) => `${p.id} ${p.host} ${p.status} ${p.cwd}`).join("\n");
 }
 
-function formatPane(p: PaneSummary): string {
+function formatPane(p: PaneInfo): string {
 	return `${p.id} ${p.cwd}`;
 }
 
 function formatExec(v: ExecResult): string {
-	if (v.status === "running") {
-		const head = `status=running job=${v.job_id} cwd=${v.cwd}`;
-		return v.output_tail ? `${head}\n${v.output_tail}` : head;
+	if (v.status === "busy") {
+		const head = `status=busy cwd=${v.cwd}`;
+		return v.output ? `${head}\n${v.output}` : head;
 	}
-	const head = v.exit_code === undefined
-		? `cwd=${v.cwd}`
-		: `exit=${v.exit_code} cwd=${v.cwd}`;
+	const head = v.exit_code === undefined ? `cwd=${v.cwd}` : `exit=${v.exit_code} cwd=${v.cwd}`;
 	return v.output ? `${head}\n${v.output}` : head;
 }
 
-function requestedProtocolVersion(params: unknown): string {
+function requestedProtocol(params: unknown): string {
 	if (!params || typeof params !== "object" || Array.isArray(params)) return PROTOCOL_VERSION;
-	const version = (params as Record<string, unknown>).protocolVersion;
-	return typeof version === "string" && version.trim() ? version : PROTOCOL_VERSION;
+	const ver = (params as Record<string, unknown>).protocolVersion;
+	return typeof ver === "string" && ver.trim() ? ver : PROTOCOL_VERSION;
 }
 
-function result(id: JsonRpcId, value: unknown): JsonRpcResponse {
+function ok(id: JsonRpcId, value: unknown): JsonRpcResponse {
 	return { jsonrpc: "2.0", id, result: value };
 }
 
-function failure(id: JsonRpcId, code: number, message: string): JsonRpcResponse {
+function err(id: JsonRpcId, code: number, message: string): JsonRpcResponse {
 	return { jsonrpc: "2.0", id, error: { code, message } };
 }
 
 export async function runStdio(server = createMcpServer()): Promise<void> {
 	process.stdin.setEncoding("utf8");
-	let buffer = "";
+	let buf = "";
 	for await (const chunk of process.stdin) {
-		buffer += chunk;
-		let newline = buffer.indexOf("\n");
-		while (newline >= 0) {
-			await handleLine(server, buffer.slice(0, newline));
-			buffer = buffer.slice(newline + 1);
-			newline = buffer.indexOf("\n");
+		buf += chunk;
+		let nl = buf.indexOf("\n");
+		while (nl >= 0) {
+			await handleLine(server, buf.slice(0, nl));
+			buf = buf.slice(nl + 1);
+			nl = buf.indexOf("\n");
 		}
 	}
-	if (buffer.trim()) await handleLine(server, buffer);
+	if (buf.trim()) await handleLine(server, buf);
 }
 
 async function handleLine(server: ReturnType<typeof createMcpServer>, line: string): Promise<void> {
 	if (!line.trim()) return;
-	let response: JsonRpcResponse | undefined;
+	let res: JsonRpcResponse | undefined;
 	try {
-		response = await server.handle(JSON.parse(line));
+		res = await server.handle(JSON.parse(line));
 	} catch {
-		response = failure(null, -32700, "Parse error");
+		res = err(null, -32700, "Parse error");
 	}
-	if (response) process.stdout.write(`${JSON.stringify(response)}\n`);
+	if (res) process.stdout.write(`${JSON.stringify(res)}\n`);
 }
 
 if (import.meta.main) {
-	runStdio().catch((error) => {
-		process.stderr.write(`${error instanceof Error ? error.stack ?? error.message : String(error)}\n`);
+	runStdio().catch((e) => {
+		process.stderr.write(`${e instanceof Error ? e.stack ?? e.message : String(e)}\n`);
 		process.exitCode = 1;
 	});
 }
