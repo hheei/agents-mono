@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 
-import { assertNoControlChars, optBool, optInt, optString, reqString, validateHexId, validateHost } from "./process";
+import { assertNoControlChars, isLocalHost, optBool, optInt, optString, reqString, validateHexId, validateHost } from "./process";
 import { type CloseResult, type GetResult, type PaneInfo, type PaneResult, PaneService } from "./service";
 import type { TransferResult } from "./ssh";
 
@@ -21,6 +21,7 @@ interface JsonRpcResponse {
 }
 
 interface McpServerOptions {
+	allowLocal?: boolean;
 	get?: (input: { id?: string; lines?: number }) => Promise<GetResult>;
 	spawn?: (input: { host?: string; cwd?: string; ttl?: number }) => Promise<PaneInfo>;
 	send?: (input: { id: string; input: string; async?: boolean; timeout_ms?: number }) => Promise<PaneResult>;
@@ -33,7 +34,8 @@ interface McpServerOptions {
 const PROTOCOL_VERSION = "2025-06-18";
 const SERVER_INFO = { name: "host_term", version: "0.8.0" };
 
-const TOOLS = [
+function buildTools(allowLocal: boolean) {
+	return [
 	{
 		name: "get",
 		description: "List all panes, or inspect one pane's state, fg/tty, and recent output.",
@@ -49,7 +51,9 @@ const TOOLS = [
 	},
 	{
 		name: "spawn",
-		description: "Open a shell pane (host defaults to 'local', or pass an SSH alias).",
+		description: allowLocal
+			? "Open a shell pane (host defaults to 'local', or pass an SSH alias)."
+			: "Open a remote SSH shell pane on host.",
 		inputSchema: {
 			type: "object",
 			properties: {
@@ -57,7 +61,7 @@ const TOOLS = [
 				cwd: { type: "string" },
 				ttl: { type: "integer", minimum: 0 },
 			},
-			required: [],
+			required: allowLocal ? [] : ["host"],
 			additionalProperties: false,
 		},
 	},
@@ -92,7 +96,9 @@ const TOOLS = [
 	},
 	{
 		name: "download",
-		description: "SFTP download from a remote pane (remote relative to pane cwd; local defaults to ~/Downloads).",
+		description: allowLocal
+			? "SFTP download from a remote pane (remote relative to pane cwd; local defaults to ~/Downloads)."
+			: "SFTP download from pane (remote relative to pane cwd; local defaults to ~/Downloads).",
 		inputSchema: {
 			type: "object",
 			properties: {
@@ -106,7 +112,9 @@ const TOOLS = [
 	},
 	{
 		name: "upload",
-		description: "SFTP upload to a remote pane (remote defaults to pane cwd).",
+		description: allowLocal
+			? "SFTP upload to a remote pane (remote defaults to pane cwd)."
+			: "SFTP upload to pane (remote defaults to pane cwd).",
 		inputSchema: {
 			type: "object",
 			properties: {
@@ -130,10 +138,13 @@ const TOOLS = [
 			additionalProperties: false,
 		},
 	},
-];
+	];
+}
 
 export function createMcpServer(opts: McpServerOptions = {}) {
-	const service = new PaneService();
+	const allowLocal = opts.allowLocal ?? false;
+	const tools = buildTools(allowLocal);
+	const service = new PaneService({ allowLocal });
 	const ops = {
 		get: opts.get ?? ((input) => service.get(input)),
 		spawn: opts.spawn ?? ((input) => service.spawn(input)),
@@ -159,9 +170,9 @@ export function createMcpServer(opts: McpServerOptions = {}) {
 				case "ping":
 					return ok(id, {});
 				case "tools/list":
-					return ok(id, { tools: TOOLS });
+					return ok(id, { tools });
 				case "tools/call":
-					return await callTool(id, msg.params, ops);
+					return await callTool(id, msg.params, ops, allowLocal);
 				default:
 					if (msg.id === undefined) return undefined;
 					return err(id, -32601, `Method not found: ${msg.method}`);
@@ -173,7 +184,8 @@ export function createMcpServer(opts: McpServerOptions = {}) {
 async function callTool(
 	id: JsonRpcId,
 	params: unknown,
-	ops: Required<McpServerOptions>,
+	ops: Omit<Required<McpServerOptions>, "allowLocal">,
+	allowLocal: boolean,
 ): Promise<JsonRpcResponse> {
 	if (!params || typeof params !== "object" || Array.isArray(params)) {
 		return err(id, -32602, "tools/call params must be an object");
@@ -197,7 +209,12 @@ async function callTool(
 
 			case "spawn": {
 				assertKnownKeys(a, ["host", "cwd", "ttl"], "spawn");
-				const host = a.host === undefined || a.host === null ? "local" : validateHost(reqString(a.host, "spawn.host"));
+				const host = !allowLocal || (a.host !== undefined && a.host !== null)
+					? validateHost(reqString(a.host, "spawn.host"))
+					: "local";
+				if (!allowLocal && isLocalHost(host)) {
+					return err(id, -32602, "local panes are disabled; start host_term with --local to enable local panes");
+				}
 				const cwd = optString(a.cwd, "spawn.cwd");
 				if (cwd) assertNoControlChars(cwd, "spawn.cwd");
 				const ttl = optInt(a.ttl, "spawn.ttl", 0);
@@ -350,7 +367,8 @@ async function handleLine(server: ReturnType<typeof createMcpServer>, line: stri
 }
 
 if (import.meta.main) {
-	runStdio().catch((e) => {
+	const allowLocal = process.argv.slice(2).includes("--local");
+	runStdio(createMcpServer({ allowLocal })).catch((e) => {
 		process.stderr.write(`${e instanceof Error ? e.stack ?? e.message : String(e)}\n`);
 		process.exitCode = 1;
 	});

@@ -482,6 +482,7 @@ describe("PaneService", () => {
 		const service = new PaneService({
 			runner: harness.runner,
 			env: { AGENTS_SSH_CACHE_DIR: cache },
+			allowLocal: true,
 		});
 
 		const p = await service.spawn({ host: "local", cwd: "/tmp" });
@@ -580,6 +581,7 @@ describe("PaneService", () => {
 		const service = new PaneService({
 			runner: harness.runner,
 			env: { AGENTS_SSH_CACHE_DIR: cache },
+			allowLocal: true,
 		});
 
 		const spawned = await service.spawn();
@@ -601,6 +603,7 @@ describe("PaneService", () => {
 		const service = new PaneService({
 			runner: harness.runner,
 			env: { AGENTS_SSH_CACHE_DIR: cache, AGENTS_SSH_IDLE_TTL: "60" },
+			allowLocal: true,
 			now: () => nowMs,
 		});
 
@@ -620,6 +623,7 @@ describe("PaneService", () => {
 		const service = new PaneService({
 			runner: harness.runner,
 			env: { AGENTS_SSH_CACHE_DIR: cache },
+			allowLocal: true,
 		});
 
 		const spawned = await service.spawn({ host: "local" });
@@ -707,10 +711,24 @@ describe("PaneService", () => {
 		const service = new PaneService({
 			runner: harness.runner,
 			env: { AGENTS_SSH_CACHE_DIR: cache },
+			allowLocal: true,
 		});
 
 		const localPane = await service.spawn();
 		await expect(service.download({ id: localPane.id, remote: "a.txt" })).rejects.toThrow("remote panes");
 		await expect(service.upload({ id: localPane.id, local: "a.txt" })).rejects.toThrow("remote panes");
+	});
+
+	test("rejects local panes when allowLocal is false (default)", async () => {
+		const cache = await tempCache();
+		const harness = createHerdrHarness();
+		const service = new PaneService({
+			runner: harness.runner,
+			env: { AGENTS_SSH_CACHE_DIR: cache },
+		});
+
+		await expect(service.spawn()).rejects.toThrow("host is required");
+		await expect(service.spawn({ host: "local" })).rejects.toThrow("local panes are disabled");
+		await expect(service.spawn({ host: "localhost" })).rejects.toThrow("local panes are disabled");
 	});
 });

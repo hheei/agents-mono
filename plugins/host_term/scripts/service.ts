@@ -35,6 +35,7 @@ export interface PaneServiceOptions {
 	env?: NodeJS.ProcessEnv;
 	now?: () => number;
 	downloadsDir?: string;
+	allowLocal?: boolean;
 }
 
 export interface PaneInfo {
@@ -88,6 +89,7 @@ export class PaneService {
 	readonly #herdr: HerdrClient;
 	readonly #defaultTtl: number;
 	readonly #now: () => number;
+	readonly #allowLocal: boolean;
 
 	constructor(opts: PaneServiceOptions = {}) {
 		const env = opts.env ?? process.env;
@@ -98,6 +100,7 @@ export class PaneService {
 		this.#herdr = new HerdrClient(this.#runner, this.#ssh);
 		this.#defaultTtl = readDefaultTtl(env);
 		this.#now = opts.now ?? (() => Date.now());
+		this.#allowLocal = opts.allowLocal ?? false;
 	}
 
 	async get(input: { id?: string; lines?: number } = {}): Promise<GetResult> {
@@ -155,7 +158,13 @@ export class PaneService {
 	}
 
 	async spawn(input: { host?: string; cwd?: string; ttl?: number } = {}): Promise<PaneInfo> {
+		if (!this.#allowLocal && (input.host === undefined || input.host === null)) {
+			throw new Error("host is required when local panes are disabled");
+		}
 		const host = input.host === undefined || input.host === null ? "local" : validateHost(reqString(input.host, "host"));
+		if (!this.#allowLocal && isLocalHost(host)) {
+			throw new Error("local panes are disabled; start host_term with --local to enable local panes");
+		}
 		const cwd = optString(input.cwd, "cwd");
 		if (cwd) assertNoControlChars(cwd, "cwd");
 		const ttl = normalizeTtl(input.ttl, this.#defaultTtl);

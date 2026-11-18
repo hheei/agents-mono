@@ -179,6 +179,7 @@ describe("host_term MCP server", () => {
 	test("accepts null optional params, rejects control chars, trims ids, and omits empty output text", async () => {
 		const calls: string[] = [];
 		const server = createMcpServer({
+			allowLocal: true,
 			get: async (input) => {
 				calls.push(`get:${input.id ?? "*"}:${input.lines ?? "-"}`);
 				return { panes: [] };
@@ -243,5 +244,40 @@ describe("host_term MCP server", () => {
 			"dl:a1b2c3:f.txt:-",
 			"ul:a1b2c3:/tmp/f.txt:-",
 		]);
+	});
+
+	test("disables local panes by default and adapts spawn schema/prompt when allowLocal is false vs true", async () => {
+		const remoteOnly = createMcpServer({
+			spawn: async (input) => ({ id: "a1b2c3", host: input.host ?? "bad", status: "idle", cwd: "/tmp" }),
+		});
+		const listedDefault = await remoteOnly.handle({ jsonrpc: "2.0", id: 30, method: "tools/list" });
+		const defaultTools = (listedDefault?.result as { tools: Array<{ name: string; description: string; inputSchema: { required?: string[] } }> }).tools;
+		const defaultSpawn = defaultTools.find((t) => t.name === "spawn")!;
+		expect(defaultSpawn.inputSchema.required).toEqual(["host"]);
+		expect(defaultSpawn.description).toBe("Open a remote SSH shell pane on host.");
+
+		const missingHost = await remoteOnly.handle({
+			jsonrpc: "2.0",
+			id: 31,
+			method: "tools/call",
+			params: { name: "spawn", arguments: {} },
+		});
+		expect(missingHost?.error?.code).toBe(-32602);
+
+		const localRejected = await remoteOnly.handle({
+			jsonrpc: "2.0",
+			id: 32,
+			method: "tools/call",
+			params: { name: "spawn", arguments: { host: "local" } },
+		});
+		expect(localRejected?.error?.code).toBe(-32602);
+		expect(localRejected?.error?.message).toContain("--local");
+
+		const withLocal = createMcpServer({ allowLocal: true });
+		const listedLocal = await withLocal.handle({ jsonrpc: "2.0", id: 33, method: "tools/list" });
+		const localTools = (listedLocal?.result as { tools: Array<{ name: string; description: string; inputSchema: { required?: string[] } }> }).tools;
+		const localSpawn = localTools.find((t) => t.name === "spawn")!;
+		expect(localSpawn.inputSchema.required).toEqual([]);
+		expect(localSpawn.description).toBe("Open a shell pane (host defaults to 'local', or pass an SSH alias).");
 	});
 });

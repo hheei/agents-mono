@@ -5,7 +5,7 @@ Stateful local and remote shell panes backed by Herdr + OpenSSH ControlMaster + 
 ## Tools (`host_term` namespace)
 
 - `get`: List all active panes, or pass `id` to inspect a pane's state, `fg`/`tty`, and recent output without blocking.
-- `spawn`: Open a shell pane (`host` defaults to `local`, or pass an SSH alias), optionally starting in `cwd` (supports `~` / `~/`), and return its 6-char lowercase hex `id`.
+- `spawn`: Open a remote SSH shell pane on `host` (or pass `--local` on server startup to enable local panes and make `host` default to `local`), optionally starting in `cwd` (supports `~` / `~/`), and return its 6-char lowercase hex `id`.
 - `send`: Run `input` in an `idle` pane (sync wait or `async: true`), or send interactive text/keys (e.g. `"y\n"`, `"ctrl-c"`) to a `busy` pane.
 - `wait`: Wait for a `busy` pane to become `idle` (reporting `fg`/`tty`/`stalled` on timeout).
 - `download`: SFTP download `remote` from a remote pane (supports `~/` or relative to pane `cwd`) to `local` (defaults to `~/Downloads`).
@@ -13,6 +13,8 @@ Stateful local and remote shell panes backed by Herdr + OpenSSH ControlMaster + 
 - `close`: Close pane `id`.
 
 ## Configuration
+
+- `--local` (CLI flag): Opt in to local shell panes (without `--local`, `spawn` requires a remote SSH alias and rejects `local`/`localhost`).
 
 - `AGENTS_SSH_IDLE_TTL`: Idle auto-close TTL in seconds (`1800` default, `0` disables lazy GC).
 - `AGENTS_SSH_CACHE_DIR`: Override cache/state directory (`~/.cache/agents-ssh` default).
