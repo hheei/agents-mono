@@ -17,6 +17,7 @@ describe("host_term MCP server", () => {
 			protocolVersion: "2025-06-18",
 			serverInfo: { name: "host_term", version: "0.8.0" },
 			capabilities: { tools: {} },
+			instructions: "Use host_term instead of shell `ssh`/`scp` commands to operate remote hosts. Sessions preserve cwd, env, and background jobs across calls (spawn -> send/wait -> download/upload -> close).",
 		});
 
 		const listed = await server.handle({ jsonrpc: "2.0", id: 2, method: "tools/list" });
@@ -254,7 +255,7 @@ describe("host_term MCP server", () => {
 		const defaultTools = (listedDefault?.result as { tools: Array<{ name: string; description: string; inputSchema: { required?: string[] } }> }).tools;
 		const defaultSpawn = defaultTools.find((t) => t.name === "spawn")!;
 		expect(defaultSpawn.inputSchema.required).toEqual(["host"]);
-		expect(defaultSpawn.description).toBe("Open a remote SSH shell pane on host.");
+		expect(defaultSpawn.description).toContain("preferred over `ssh` in bash");
 
 		const missingHost = await remoteOnly.handle({
 			jsonrpc: "2.0",
@@ -278,6 +279,6 @@ describe("host_term MCP server", () => {
 		const localTools = (listedLocal?.result as { tools: Array<{ name: string; description: string; inputSchema: { required?: string[] } }> }).tools;
 		const localSpawn = localTools.find((t) => t.name === "spawn")!;
 		expect(localSpawn.inputSchema.required).toEqual([]);
-		expect(localSpawn.description).toBe("Open a shell pane (host defaults to 'local', or pass an SSH alias).");
+		expect(localSpawn.description).toContain("defaults to 'local'");
 	});
 });

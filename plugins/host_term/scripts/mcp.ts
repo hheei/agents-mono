@@ -34,11 +34,17 @@ interface McpServerOptions {
 const PROTOCOL_VERSION = "2025-06-18";
 const SERVER_INFO = { name: "host_term", version: "0.8.0" };
 
+function buildInstructions(allowLocal: boolean): string {
+	return allowLocal
+		? "Use host_term instead of shell `ssh`/`scp` for remote hosts, and for stateful/interactive local shells. Keep sessions open across commands (spawn -> send/wait -> download/upload -> close)."
+		: "Use host_term instead of shell `ssh`/`scp` commands to operate remote hosts. Sessions preserve cwd, env, and background jobs across calls (spawn -> send/wait -> download/upload -> close).";
+}
+
 function buildTools(allowLocal: boolean) {
 	return [
 	{
 		name: "get",
-		description: "List all panes, or inspect one pane's state, fg/tty, and recent output.",
+		description: "List active shell sessions, or inspect one pane's status, cwd, fg/tty, and recent output.",
 		inputSchema: {
 			type: "object",
 			properties: {
@@ -52,8 +58,8 @@ function buildTools(allowLocal: boolean) {
 	{
 		name: "spawn",
 		description: allowLocal
-			? "Open a shell pane (host defaults to 'local', or pass an SSH alias)."
-			: "Open a remote SSH shell pane on host.",
+			? "Open a persistent shell pane (defaults to 'local', or pass an SSH host; preferred over `ssh` in bash)."
+			: "Open a persistent remote shell session on an SSH host (preferred over `ssh` in bash; preserves cwd/env/jobs).",
 		inputSchema: {
 			type: "object",
 			properties: {
@@ -67,7 +73,7 @@ function buildTools(allowLocal: boolean) {
 	},
 	{
 		name: "send",
-		description: "Run command when idle, or send input/keys (e.g. 'y\\n', 'ctrl-c') when busy.",
+		description: "Run a command in an idle pane (sync or async), or send interactive input/keys (e.g. 'y\\n', 'ctrl-c') when busy.",
 		inputSchema: {
 			type: "object",
 			properties: {
@@ -82,7 +88,7 @@ function buildTools(allowLocal: boolean) {
 	},
 	{
 		name: "wait",
-		description: "Wait for a busy pane to become idle.",
+		description: "Wait for a busy pane to become idle (reports fg/tty/stalled on timeout).",
 		inputSchema: {
 			type: "object",
 			properties: {
@@ -97,8 +103,8 @@ function buildTools(allowLocal: boolean) {
 	{
 		name: "download",
 		description: allowLocal
-			? "SFTP download from a remote pane (remote relative to pane cwd; local defaults to ~/Downloads)."
-			: "SFTP download from pane (remote relative to pane cwd; local defaults to ~/Downloads).",
+			? "Download a file or directory from a remote pane via SFTP (remote-only; preferred over `scp`; local defaults to ~/Downloads)."
+			: "Download a file or directory from a remote pane via SFTP (preferred over `scp`; remote relative to pane cwd, local defaults to ~/Downloads).",
 		inputSchema: {
 			type: "object",
 			properties: {
@@ -113,8 +119,8 @@ function buildTools(allowLocal: boolean) {
 	{
 		name: "upload",
 		description: allowLocal
-			? "SFTP upload to a remote pane (remote defaults to pane cwd)."
-			: "SFTP upload to pane (remote defaults to pane cwd).",
+			? "Upload a file or directory to a remote pane via SFTP (remote-only; preferred over `scp`; remote defaults to pane cwd)."
+			: "Upload a file or directory to a remote pane via SFTP (preferred over `scp`; remote defaults to pane cwd).",
 		inputSchema: {
 			type: "object",
 			properties: {
@@ -128,7 +134,7 @@ function buildTools(allowLocal: boolean) {
 	},
 	{
 		name: "close",
-		description: "Close a pane.",
+		description: "Close a pane when done.",
 		inputSchema: {
 			type: "object",
 			properties: {
@@ -164,6 +170,7 @@ export function createMcpServer(opts: McpServerOptions = {}) {
 						protocolVersion: requestedProtocol(msg.params),
 						serverInfo: SERVER_INFO,
 						capabilities: { tools: {} },
+						instructions: buildInstructions(allowLocal),
 					});
 				case "notifications/initialized":
 					return undefined;
